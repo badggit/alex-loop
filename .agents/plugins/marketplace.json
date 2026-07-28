@@ -1,0 +1,20 @@
+{
+  "name": "alex-loop",
+  "interface": {
+    "displayName": "Alex Loop"
+  },
+  "plugins": [
+    {
+      "name": "alex-loop",
+      "source": {
+        "source": "local",
+        "path": "./plugins/alex-loop"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

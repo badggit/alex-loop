@@ -1,0 +1,4 @@
+interface:
+  display_name: "Git Branch"
+  short_description: "Create a feature branch that matches the project's existing naming conventions."
+  default_prompt: "Use $feature-git-branch to create a feature branch for this work."

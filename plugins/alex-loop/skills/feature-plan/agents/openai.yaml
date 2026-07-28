@@ -1,0 +1,4 @@
+interface:
+  display_name: "Feature Plan"
+  short_description: "Step 2/3 of the Alex Loop workflow. Break an approved design into bite-sized implementation tasks with exact file paths, test commands, and TDD steps."
+  default_prompt: "Use $feature-plan to break the approved design into an implementation plan."

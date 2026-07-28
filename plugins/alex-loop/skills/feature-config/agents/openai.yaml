@@ -1,0 +1,4 @@
+interface:
+  display_name: "Feature Config"
+  short_description: "Review and set the plugin's repo-level directives."
+  default_prompt: "Use $feature-config to review the loop settings and set the repo directives."

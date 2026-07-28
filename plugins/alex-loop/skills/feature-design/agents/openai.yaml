@@ -1,0 +1,4 @@
+interface:
+  display_name: "Feature Design"
+  short_description: "Step 1/3 of the Alex Loop workflow. Explore intent through clarifying questions and produce an approved design before any code is written."
+  default_prompt: "Use $feature-design to explore and approve a design before writing code."

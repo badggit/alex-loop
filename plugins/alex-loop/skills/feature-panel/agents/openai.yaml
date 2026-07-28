@@ -1,0 +1,4 @@
+interface:
+  display_name: "Feature Panel"
+  short_description: "Fan out analyst subagents over a work-list, then verify the synthesis against the cited code in four modes (discuss / challenge / gap / review)."
+  default_prompt: "Use $feature-panel to fan out analysts and verify the findings."

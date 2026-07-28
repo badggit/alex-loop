@@ -1,0 +1,4 @@
+interface:
+  display_name: "Git Commit"
+  short_description: "Commit scoped changes with a conventional message after the project checks pass."
+  default_prompt: "Use $feature-git-commit to commit the current changes."

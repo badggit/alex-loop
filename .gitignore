@@ -1,0 +1,29 @@
+# Machine-local instructions, wiki and reports
+*.local
+*.local.*
+local.*
+/docs.local/
+/CLAUDE.md
+/AGENTS.md
+
+# Agent harness local state (keep the trailing slash: .claude* would eat .claude-plugin/)
+.claude/
+.codex/
+
+# Secrets
+.env
+.env.*
+
+# OS junk
+.DS_Store
+._*
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*~
+
+# Tooling
+node_modules/
+*.log

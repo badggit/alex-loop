@@ -1,0 +1,37 @@
+{
+  "name": "alex-loop",
+  "version": "1.12.0",
+  "description": "Design-to-implementation skill chain for Codex: feature-design, then feature-plan, then feature-implement, with an adversarial feature-challenge pass and a feature-panel multi-agent verifier. A feature-fix fast path handles scoped changes (bugs, chores, tweaks) with a known end-state, no design phase. Opt-in autonomous mode self-drives the chain after design approval, panel-gated to a unanimous bar. Bundles the feature-git-branch and feature-git-commit helpers plus session-injected workflow rules. A feature-config interview reviews and writes the repo-level directives (autonomous mode, commit policy, external models).",
+  "author": {
+    "name": "suxxes and badggit"
+  },
+  "keywords": [
+    "feature-design",
+    "feature-plan",
+    "feature-implement",
+    "multi-agent",
+    "workflow",
+    "code-review",
+    "autonomous",
+    "configuration"
+  ],
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "Alex Loop",
+    "shortDescription": "Design-to-implementation skill chain with an adversarial challenge pass and a multi-agent verifier.",
+    "longDescription": "Packages the feature-design, feature-plan, and feature-implement backbone plus the feature-challenge adversarial pass and the feature-panel multi-agent verifier that gates each phase. Opt-in autonomous mode self-drives the chain after design approval, panel-gated to a unanimous bar. Bundles feature-git-branch and feature-git-commit. A feature-config interview reviews and writes the repo-level directives.",
+    "developerName": "suxxes and badggit",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Design a feature and guide it through implementation.",
+      "Fix a scoped bug with root-cause verification.",
+      "Challenge this design or plan before implementation.",
+      "Configure the loop's repo-level settings."
+    ]
+  }
+}

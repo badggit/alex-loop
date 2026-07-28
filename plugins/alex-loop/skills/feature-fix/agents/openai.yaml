@@ -1,0 +1,4 @@
+interface:
+  display_name: "Feature Fix"
+  short_description: "Scoped-change fast path: reproduce, root-cause, minimal fix, verify, commit — for bugs and small changes with a known end-state, no design phase."
+  default_prompt: "Use $feature-fix to reproduce, root-cause, and land a minimal verified fix."

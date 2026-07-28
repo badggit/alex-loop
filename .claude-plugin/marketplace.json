@@ -1,0 +1,21 @@
+{
+  "$schema": "https://www.schemastore.org/claude-code-marketplace.json",
+  "name": "alex-loop",
+  "description": "Marketplace for the alex-loop plugin: the design-to-implementation skill chain with an adversarial challenge pass and a multi-agent verifier.",
+  "version": "1.12.0",
+  "owner": {
+    "name": "suxxes and badggit"
+  },
+  "plugins": [
+    {
+      "name": "alex-loop",
+      "displayName": "Alex Loop",
+      "source": "./plugins/alex-loop",
+      "description": "Design-to-implementation skill chain for Claude Code: feature-design, then feature-plan, then feature-implement, with an adversarial feature-challenge pass and a feature-panel multi-agent verifier. A feature-fix fast path handles scoped changes (bugs, chores, tweaks) with a known end-state, no design phase. Opt-in autonomous mode self-drives the chain after design approval, panel-gated to a unanimous bar. Bundles the feature-git-branch and feature-git-commit helpers plus session-injected workflow rules. A feature-config interview reviews and writes the repo-level directives (autonomous mode, commit policy, external models).",
+      "author": {
+        "name": "suxxes and badggit"
+      },
+      "category": "development"
+    }
+  ]
+}

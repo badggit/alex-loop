@@ -1,0 +1,4 @@
+interface:
+  display_name: "Feature Implement"
+  short_description: "Step 3/3 of the Alex Loop workflow. Execute an implementation plan wave by wave via parallel subagents, with test-integrity and band-aid gates."
+  default_prompt: "Use $feature-implement to execute the saved implementation plan."
