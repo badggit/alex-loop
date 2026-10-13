@@ -1,7 +1,7 @@
 {
   "name": "alex-loop",
-  "version": "1.12.0",
-  "description": "Design-to-implementation skill chain for Claude Code: feature-design, then feature-plan, then feature-implement, with an adversarial feature-challenge pass and a feature-panel multi-agent verifier. A feature-fix fast path handles scoped changes (bugs, chores, tweaks) with a known end-state, no design phase. Opt-in autonomous mode self-drives the chain after design approval, panel-gated to a unanimous bar. Bundles the feature-git-branch and feature-git-commit helpers plus session-injected workflow rules. A feature-config interview reviews and writes the repo-level directives (autonomous mode, commit policy, external models).",
+  "version": "1.13.0",
+  "description": "Design-to-implementation skill chain for Claude Code: feature-design, then feature-plan, then feature-implement, with an adversarial feature-challenge pass and a feature-panel multi-agent verifier. A feature-fix fast path handles scoped changes (bugs, chores, tweaks) with a known end-state, no design phase. Opt-in autonomous mode self-drives the chain after design approval, panel-gated to a unanimous bar. Bundles the feature-git-branch and feature-git-commit helpers plus session-injected workflow rules. A feature-config interview reviews and writes the repo-level directives (autonomous mode, commit policy, external models). A context-watchdog skill keeps working state across auto-compaction: a checkpoint is saved before it and restored after it.",
   "author": {
     "name": "suxxes and badggit"
   },
@@ -13,6 +13,8 @@
     "workflow",
     "code-review",
     "autonomous",
-    "configuration"
-  ]
+    "configuration",
+    "compaction"
+  ],
+  "hooks": "./hooks/context-watchdog.json"
 }

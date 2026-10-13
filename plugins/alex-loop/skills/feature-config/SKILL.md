@@ -1,6 +1,6 @@
 ---
 name: feature-config
-description: "Interactive configurator for the plugin's repo-level settings. Reviews every recognized alex-loop directive (autonomous mode, commit policy, external-model egress, design-interview depth) with its current value, asks one question per setting with skip and unset options, and writes anchored directive lines into the repo-root instruction file (CLAUDE.md under Claude Code, AGENTS.md under Codex; a machine-local CLAUDE.local.md/AGENTS.local.md is preferred when present). Invoke ONLY when the user explicitly names this skill ('/feature-config', 'use feature-config', 'configure Alex Loop'). Do NOT self-trigger on generic requests like 'turn on autonomous mode' or 'change the commit policy' — handle those as ordinary instruction-file edits unless the user asks for this skill."
+description: "Interactive configurator for the plugin's repo-level settings. Reviews every recognized alex-loop directive (autonomous mode, commit policy, external-model egress, design-interview depth, context-watchdog auto-enable) with its current value, asks one question per setting with skip and unset options, and writes anchored directive lines into the repo-root instruction file (CLAUDE.md under Claude Code, AGENTS.md under Codex; a machine-local CLAUDE.local.md/AGENTS.local.md is preferred when present). Invoke ONLY when the user explicitly names this skill ('/feature-config', 'use feature-config', 'configure Alex Loop'). Do NOT self-trigger on generic requests like 'turn on autonomous mode' or 'change the commit policy' — handle those as ordinary instruction-file edits unless the user asks for this skill."
 ---
 
 <!-- Updated: 2026-07-28 -->
@@ -19,6 +19,7 @@ The canonical list of repo-level settings. A future directive is added HERE firs
 | Commit policy | `alex-loop commit-policy: <value>` | `auto`, `per-task`, `per-wave`, `final`, `manual` | `auto` | `commit-authority` rule — loop runs only |
 | External models | `alex-loop external-models: <providers>` | comma-separated providers (e.g. `openai, google`) or `none` | no standing egress authorization — cross-family seats need an in-session grant | `model-selection` rule's Data egress policy; cross-family seats in `feature-challenge` / `feature-panel` |
 | Design questions | `alex-loop design-questions: <value>` | `auto`, `few`, `medium`, `many` | `auto` — adaptive interview depth | `feature-design` interview (a live plain-language hint overrides it; autonomous mode ignores it) |
+| Context watchdog auto-enable | `alex-loop context-watchdog: off` | present / absent | absent - `feature-design`, `feature-plan`, `feature-implement` switch the watchdog on for their session | `context-watchdog` hook script (an explicit `/alex-loop:context-watchdog on` still works) |
 
 Directive form: the whole line, bare or HTML-comment-wrapped (`<!-- alex-loop: autonomous -->`), nothing else on it. Detection everywhere in the plugin is an anchored whole-line grep, so a directive embedded in prose is dead — this skill must never produce one.
 
@@ -42,6 +43,7 @@ grep -hsE '^(<!-- *)?alex-loop: *autonomous( *-->)? *$' "$ROOT/CLAUDE.md" "$ROOT
 grep -hsE '^(<!-- *)?alex-loop commit-policy: *(auto|per-task|per-wave|final|manual)( *-->)? *$' "$ROOT/CLAUDE.md" "$ROOT/AGENTS.md" "$ROOT/CLAUDE.local.md" "$ROOT/AGENTS.local.md"
 grep -hsE '^(<!-- *)?alex-loop external-models: *[A-Za-z0-9][A-Za-z0-9, _-]*( *-->)? *$' "$ROOT/CLAUDE.md" "$ROOT/AGENTS.md" "$ROOT/CLAUDE.local.md" "$ROOT/AGENTS.local.md"
 grep -hsE '^(<!-- *)?alex-loop design-questions: *(auto|few|medium|many)( *-->)? *$' "$ROOT/CLAUDE.md" "$ROOT/AGENTS.md" "$ROOT/CLAUDE.local.md" "$ROOT/AGENTS.local.md"
+grep -hsE '^(<!-- *)?alex-loop context-watchdog: *off( *-->)? *$' "$ROOT/CLAUDE.md" "$ROOT/AGENTS.md" "$ROOT/CLAUDE.local.md" "$ROOT/AGENTS.local.md"
 ```
 
 Show a one-block summary before asking anything: each setting, its current effective value (or "not set — default: X"), and which file carries it.
@@ -66,6 +68,7 @@ Question shapes:
 2. **Commit policy** — coarse choice first: `auto` / `manual` / narrower granularity / skip-or-unset. If "narrower granularity" is picked, follow up with `per-task` / `per-wave` / `final`. Five values plus skip exceed one question's option budget — split it, one concern per question.
 3. **External models** — `none` (explicitly forbid egress) / a provider allowlist (offer the common ones, free-text for others) / unset (no standing authorization; in-session grants remain possible) / skip.
 4. **Design questions** — coarse choice first: `auto` / a fixed level / skip-or-unset. If "a fixed level" is picked, follow up with `few` / `medium` / `many`. Same split rationale as commit policy.
+5. **Context watchdog auto-enable** - keep current (recommended) / opt out (`off`: the loop skills stop switching it on) / unset (back to auto-enable) / skip. Session-level `on` / `off` is not a repo setting - point the user at `/alex-loop:context-watchdog` for that.
 
 Recommendations are grounded in state: keep what is already set; for unset settings recommend the default unless the user's request indicates otherwise. Never recommend enabling `autonomous` or an egress allowlist cold — both widen what the loop may do without asking, so the user must reach for them.
 

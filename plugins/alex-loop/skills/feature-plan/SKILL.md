@@ -21,9 +21,11 @@ Assume they are a skilled developer, but know almost nothing about our toolset o
 
 **Context:** This is typically invoked after `feature-design` produces and saves an approved design.
 
-**Save plans to:** `docs/alex-loop/YYYY-MM-DD-<topic>/NN-plan.md` — the same feature folder as the design being planned; `NN` is the next free two-digit prefix among `*-plan.md` files (plans are numbered independently of designs and challenges, so the first plan is `01-plan.md`, a second is `02-plan.md`).
+**Save plans to:** `docs/alex-loop/YYYY-MM-DD-[<ticket>-]<topic>/NN-plan.md` — the same feature folder as the design being planned; `NN` is the next free two-digit prefix among `*-plan.md` files (plans are numbered independently of designs and challenges, so the first plan is `01-plan.md`, a second is `02-plan.md`).
 
 **Artifact root.** All `docs/alex-loop/` paths in this skill resolve against an artifact root: when a `docs.local/` folder already exists at the repo root, artifacts live under `docs.local/alex-loop/` instead — create the `alex-loop/` subfolder there if missing. Otherwise use `docs/alex-loop/` — create `docs/` and `docs/alex-loop/` if missing. NEVER create `docs.local/` itself: its pre-existence is the opt-in. When locating existing artifacts, check both roots.
+
+**Feature folder name.** A new feature folder is `YYYY-MM-DD-<topic>`, or `YYYY-MM-DD-<ticket>-<topic>` when the work is tied to a numbered ticket (`RAM-123` style tracker key kept verbatim, `#123` normalized to `gh-123`), taken from the user's request / skill arguments first (a key presented as the work's ticket or a tracker / GitHub issue URL - `UTF-8`, `SHA-256`, `CVE-...`, "option #2" are not tickets), then from an issue-key segment in the current branch name when that branch is not the default branch and was clearly created for this work. Never invent or ask for a key; an existing feature folder is reused as-is, never renamed. Full rule: `feature-design` -> Saving the Design.
 
 ## Execution Model — Planner Subagent
 
@@ -94,7 +96,7 @@ If no approved design file exists, stop and use `AskUserQuestion` (or the equiva
 1. **Yes, create design first** — Invoke `feature-design`.
 2. **No, I'll provide the path** — Wait for the user to provide the exact saved design document path, then read it before continuing.
 
-If the user pastes or describes a design in chat instead of giving a saved path, do not proceed to planning. First write that design to `docs/alex-loop/YYYY-MM-DD-<topic>/01-design.md`, confirm the saved file, and only then continue.
+If the user pastes or describes a design in chat instead of giving a saved path, do not proceed to planning. First write that design to `docs/alex-loop/YYYY-MM-DD-[<ticket>-]<topic>/01-design.md` (folder named per **Feature folder name** above), confirm the saved file, and only then continue.
 
 ### Read the codebase before drafting tasks
 

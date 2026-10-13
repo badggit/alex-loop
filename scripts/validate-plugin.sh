@@ -89,6 +89,24 @@ else
   fail "missing hook: $HOOK"
 fi
 
+# --- Context watchdog: syntax, executable bit, offline behavior tests ---
+WATCHDOG="$PLUGIN/skills/context-watchdog/scripts/watchdog.sh"
+if [ -f "$WATCHDOG" ]; then
+  sh -n "$WATCHDOG" || fail "context-watchdog script has shell syntax errors"
+  [ -x "$WATCHDOG" ] || fail "context-watchdog script is not executable"
+  # Claude Code only: registered through the Claude manifest, never through
+  # the hooks file Codex shares
+  WD_HOOKS="$PLUGIN/$(jq -r '.hooks // ""' "$PLUGIN/.claude-plugin/plugin.json" 2>/dev/null)"
+  jq -e '[.hooks[][] .hooks[] | select(.command | contains("context-watchdog/scripts/watchdog.sh"))] | length > 0' \
+    "$WD_HOOKS" >/dev/null 2>&1 || fail "the Claude manifest's hooks file does not register the context-watchdog script"
+  if grep -q 'context-watchdog' "$PLUGIN/hooks/hooks.json"; then
+    fail "hooks/hooks.json (shared with Codex) must not register context-watchdog hooks"
+  fi
+  sh "$ROOT/scripts/test-context-watchdog.sh" >/dev/null || fail "context-watchdog tests failed (run scripts/test-context-watchdog.sh)"
+else
+  fail "missing context-watchdog script: $WATCHDOG"
+fi
+
 if [ "$FAIL" -eq 0 ]; then
   echo "OK: all plugin validation checks passed (version $V_CLAUDE)"
 else
