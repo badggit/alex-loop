@@ -2,8 +2,6 @@
 *.local
 *.local.*
 local.*
-/docs.local/
-/CLAUDE.md
 /AGENTS.md
 
 # Agent harness local state (keep the trailing slash: .claude* would eat .claude-plugin/)
@@ -13,6 +11,7 @@ local.*
 # Secrets
 .env
 .env.*
+!.env.example
 
 # OS junk
 .DS_Store

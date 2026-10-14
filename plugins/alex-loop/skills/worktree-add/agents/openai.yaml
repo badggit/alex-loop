@@ -1,0 +1,6 @@
+interface:
+  display_name: "Worktree Add"
+  short_description: "Create a sibling worktree for parallel work on a task."
+  default_prompt: "Use $worktree-add to create a sibling git worktree for the current task."
+policy:
+  allow_implicit_invocation: false

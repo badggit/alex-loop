@@ -4,7 +4,7 @@ description: "Step 1/3 of the Alex Loop workflow (design, then plan, then implem
 argument-hint: "<idea or request> [interview depth hint, e.g. 'ask more questions' / 'keep questions minimal']"
 ---
 
-<!-- Updated: 2026-07-12 11:53:50 UTC -->
+<!-- Updated: 2026-10-14 00:48:00 UTC -->
 
 **Announce at start:** "Using skill: **Feature Design** (step 1/3) to explore your idea before writing code."
 
@@ -181,9 +181,11 @@ Downstream artifacts note which revision they were built from, so a later reader
 
 ## Saving the Design
 
-Write every approved design to `docs/alex-loop/YYYY-MM-DD-<topic>/NN-design.md` before handing off to planning. A conversation-only design is not enough for `feature-plan`; the saved document becomes the source of truth for the plan.
+Write every approved design to `docs/alex-loop/YYYY-MM-DD-[<ticket>-]<topic>/NN-design.md` before handing off to planning. A conversation-only design is not enough for `feature-plan`; the saved document becomes the source of truth for the plan.
 
 **Artifact root.** All `docs/alex-loop/` paths in this skill resolve against an artifact root: when a `docs.local/` folder already exists at the repo root, artifacts live under `docs.local/alex-loop/` instead — create the `alex-loop/` subfolder there if missing. Otherwise use `docs/alex-loop/` — create `docs/` and `docs/alex-loop/` if missing. NEVER create `docs.local/` itself: its pre-existence is the opt-in. When locating existing artifacts, check both roots.
+
+**Feature folder name.** `YYYY-MM-DD-<topic>` by default; `YYYY-MM-DD-<ticket>-<topic>` when the work is tied to a numbered ticket (e.g. `2026-10-13-ABC-123-oauth-provider`). Ticket sources, first hit wins: (1) the user's request or skill arguments, where the key is presented as the work's ticket - a tracker key matching `[A-Z][A-Z0-9]+-[0-9]+` (e.g. `ABC-123`) named as the ticket / issue / task or given as a tracker URL, a GitHub ref (`#123` / `gh-123`) used as an issue reference, or a GitHub issue URL (`.../issues/123` means `gh-123`); (2) an issue-key segment in the current branch name (`git branch --show-current`), only when that branch is not the default branch and was clearly created for this work (its slug matches the request) - a branch left over from earlier work does not count. Standards and identifiers that merely share the shape are not tickets: `UTF-8`, `SHA-256`, `ISO-8601`, `HTTP-2`, `CVE-2024-...`, `RFC-...`, and `#2` meaning "option 2" or "step 3". Normalization matches `feature-git-branch`: a tracker key keeps its casing verbatim, `#123` becomes `gh-123`. A reference without a number (a bare tracker name, a ticket title) is not a ticket. Never invent a key and never ask for one just to name the folder - no ticket means the plain form. `<topic>` is a short kebab-case slug that does not repeat the key. Announce the folder name, and where the key came from, before the first save so the user can correct it; once created, an existing feature folder is reused as-is, never renamed.
 
 **Document header.** Every saved design starts with four identity lines — a file's existence must never be mistaken for its approval:
 

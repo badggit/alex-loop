@@ -1,0 +1,4 @@
+interface:
+  display_name: "Context Watchdog"
+  short_description: "Checkpoint working state before compaction, restore after."
+  default_prompt: "Use $context-watchdog save to write a checkpoint of the current task before compacting."

@@ -1,4 +1,4 @@
-<!-- Updated: 2026-07-10 12:07:32 UTC -->
+<!-- Updated: 2026-10-14 00:48:00 UTC -->
 
 # Use Subagents
 
@@ -95,7 +95,7 @@ When a subagent's task depends on a skill's standards or procedure:
 
 Examples:
 
-- Language work: "Read `<skills-dir>/developer-<language>/SKILL.md` and follow its reference links before writing code."
+- Language work: "Read `<skills-dir>/<language-skill>/SKILL.md` and follow its reference links before writing code."
 - Any skill-governed task: pass the skill's full `SKILL.md` path and have the subagent follow the links inside.
 
 ## Verification

@@ -1,10 +1,10 @@
-<!-- Updated: 2026-07-28 -->
+<!-- Updated: 2026-10-14 -->
 
 # alex-loop
 
 A plugin packaging the design-to-implementation skill chain plus the multi-agent verifier that gates it. Installs into both Claude Code and Codex — the skills use the open `SKILL.md` standard, so one skill set drives either harness.
 
-## Install (private repo, own machine)
+## Install
 
 ### Claude Code
 
@@ -24,7 +24,7 @@ codex plugin add alex-loop@alex-loop
 
 Codex reads the same `skills/` directory via the plugin's `.codex-plugin/plugin.json`; the marketplace lives at `.agents/plugins/marketplace.json`. Invoke a skill explicitly with `$feature-design` (or `@alex-loop` for the bundle).
 
-**Invocation policy.** Skills activate only when the user names them explicitly (slash/`$` invocation, "use <skill>", "start Alex Loop") or when another Alex Loop skill invokes them at its handoffs and gates (design -> plan -> implement, fix escalation, challenge gates, git helpers inside implement/fix). Generic phrasing — "commit this", "fix this bug", "challenge this", "create a branch" — does NOT auto-trigger a skill; each skill's description instructs the model to handle such requests as ordinary work instead.
+**Invocation policy.** Skills activate only when the user names them explicitly (slash/`$` invocation, "use <skill>", "start Alex Loop") or when another Alex Loop skill invokes them at its handoffs and gates (design -> plan -> implement, fix escalation, challenge gates, git helpers inside implement/fix). Generic phrasing — "commit this", "fix this bug", "challenge this", "create a branch" — does NOT auto-trigger a skill; each skill's description instructs the model to handle such requests as ordinary work instead. `worktree-add` goes further: it is user-invoked only (`disable-model-invocation: true` in Claude Code, `allow_implicit_invocation: false` in Codex), so no skill or model starts it on its own.
 
 Layout: the plugin itself lives under `plugins/alex-loop/` (skills plus both plugin manifests); both marketplace files at the repo root point there. Codex requires the plugin directory to be distinct from the marketplace root, and Claude Code resolves the same relative source. Each harness reads only its own manifest set and ignores the other.
 
@@ -117,17 +117,50 @@ Directives: `alex-loop: autonomous` — skips message-wording and file-selection
 
 Directives: none of its own — this skill is the interactive way to set every directive listed above.
 
+### `context-watchdog` - keep working state across auto-compaction (Claude Code)
+
+- Off by default; `/alex-loop:context-watchdog on` (or `off` / `status`) switches it for the current session only. `feature-design`, `feature-plan` and `feature-implement` switch it on automatically when they start.
+- While on, a `PreCompact` hook postpones the first auto-compact attempt and asks the agent to run `save`: a structured checkpoint (verbatim request and corrections, user decisions, statuses with evidence, workflow state, key files and commands, dead ends, next steps), written after the plan, task list and other on-disk statuses are brought up to date. Once a fresh checkpoint exists the next attempt compacts normally; without one, compaction goes ahead after 5 postponements (15 once the save has started), so the context never hits the hard limit.
+- At compaction the checkpoint becomes a restore file (a stale checkpoint can never let a later compaction through); right after it a `SessionStart` (`compact`) hook hands that file back, the agent runs `restore`, reconciles it with the summary and reality, and continues. The file is deleted as soon as it has been read. State lives under `~/.cache/alex-loop/context-watchdog/<session-id>/` (`$XDG_CACHE_HOME` respected) - outside `~/.claude`, where Claude Code refuses agent writes.
+- A manual `/compact` is never blocked: run `/alex-loop:context-watchdog save` first to keep state across it. The compaction threshold stays Claude Code's own (`/autocompact 250000`, `autoCompactWindow`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW`).
+- Claude Code only: its hooks are registered through `.claude-plugin/plugin.json` (`hooks/context-watchdog.json`), never through the `hooks/hooks.json` Codex shares, so Codex sessions get only a manual `save`.
+
+Directives: `alex-loop context-watchdog: off` - the loop skills no longer switch the watchdog on automatically; the explicit `on` still works.
+
+### `worktree-add` - a sibling worktree for parallel work
+
+- `/alex-loop:worktree-add` creates the worktree next to the main clone; `/alex-loop:worktree-add ~/worktrees` puts it into the given parent folder instead (a relative folder counts from the current one, a leading `~` or `~/` is expanded by the script, other `~` forms are refused, and a missing folder is created). User-invoked only: `disable-model-invocation: true` in Claude Code, `allow_implicit_invocation: false` in Codex (invoke it there with `$worktree-add`). Needs git 2.29+ and Node 22 or newer on PATH; the script checks both versions and never touches the network.
+- Naming: the folder is `MAINFOLDER-[TICKET-]DESCRIPTION` (the main clone's folder name plus a suffix) and the branch is the suffix alone. The ticket (`abc-123`, or `gh-123` for a GitHub issue) is taken only from the request or the current task, never from the current branch name and never invented; the description is 1-2 kebab-case words for the current task.
+- Branch, first match wins: a worktree already registered at the target on that branch is reused; an existing local branch is checked out and logged as an `EXISTING` branch with its last commit date and how far it is ahead of / behind the default branch; a single remote-tracking branch of that name becomes a tracking branch (several remotes: refused); otherwise a new branch starts from the local default branch, not from the main clone's HEAD. The default branch is found offline: the branch `origin/HEAD` points to, then `init.defaultBranch`, then `main`, then `master` (each only when that local branch exists); when none is found the start is HEAD with a warning. A warning also says when the local default branch is behind its remote-tracking branch (local refs, no fetch). Uncommitted changes of the main clone are not carried over. A locked worktree whose folder is gone is refused: run `git worktree unlock PATH`, then `git worktree prune`.
+- Ignored files of the main clone are synced per topmost ignored entry, classified by its last path component at any depth:
+
+| Class | Names | Transfer |
+|---|---|---|
+| Per-worktree copies | `.env`, `.env.*`, `CLAUDE.local.md`, `temp.local` | Copy-on-write, else a plain copy; never a symlink. |
+| Dependencies | `node_modules` | Copy-on-write clone when it is available, else a symlink; never a slow full copy. |
+| Skipped | `.cache`, `.next`, `.turbo`, `build`, `coverage`, `dist`, `out`, `.eslintcache`, `*.tsbuildinfo` | Not transferred (build and cache outputs stay per tree). |
+| Everything else | `docs.local` and all other ignored entries (`.claude`, `.venv`, `venv` included) | Symlink to the main clone. |
+
+- Copies keep file modes (a 600 `.env` stays 600) and symlinks inside a copied folder stay symlinks. A failed clone gets one plain-copy retry. Each copy is made under a temporary name next to its destination and renamed into place only when the destination is still absent; a failed or interrupted copy leaves no partial entry (the temporary copy is removed at once, or by the next run when the process was killed). The sync only adds what is missing and never overwrites anything in the worktree, an edited `.env` included. One exception: a symlink made by an earlier run of this or a similar tool (pointing exactly at the main clone's entry) where a copy or `node_modules` belongs is replaced by the copy or the clone.
+- Links, dependency clones and the temporary names get anchored patterns in the shared `info/exclude` file under an alex-loop header, appended only when not already present, because a folder pattern such as `node_modules/` does not ignore a symlink of that name. When the exclude file cannot be updated, a warning says the links show as untracked and must be removed before `git worktree remove`.
+- Links lead into the main clone: inside a worktree, `rm -rf docs.local/` (trailing slash) or `rm -rf docs.local/*` empties the main clone's folder; `python -m venv --clear` on a linked `.venv` empties the main venv; writes into a linked `.claude` change the main clone's settings. Removing the link itself (`rm docs.local`, or `rm -rf docs.local` without the slash), `git clean`, and `git worktree remove` (with or without `--force`) are safe. `.claude`, `.venv` and `venv` stay links by the user's decision.
+- Session switch: in Claude Code the skill calls `EnterWorktree` only when tool search offers it; otherwise it gives `/cd PATH` (usually the way) and `cd 'PATH' && claude` for a new terminal. Under Codex it gives `cd 'PATH' && codex`.
+- Plain shell use: `plugins/alex-loop/skills/worktree-add/scripts/worktree-add.mjs --suffix SUFFIX [--parent DIR]` (`--help` prints the usage). stdout carries only the absolute worktree path on success; log lines go to stderr. Exit codes: 0 success, 1 refusal or error (one `error` log line), 2 wrong arguments (usage text). Run inside a linked worktree, it creates nothing and prints that worktree's path.
+- Known limits: when a whole parent folder is ignored (for example `config/` with a `.env` inside), git lists it as one entry and it is linked as a whole, so its `.env` is shared. Copy-on-write needs btrfs, XFS or bcachefs on Linux or APFS on macOS; elsewhere copies are plain and `node_modules` is linked. Ignored names with control characters or invalid UTF-8 are skipped with a warning. Removal stays manual: `git worktree remove PATH` and `git branch -d BRANCH` from the main clone.
+
+Directives: none.
+
 The backbone is `feature-design -> feature-plan -> feature-implement`. `feature-fix` is the short path for scoped changes that don't need a design — bugs, regressions, chores, tweaks — routing into `feature-design` only when a supposed fix turns out to need a decision. `feature-panel` supplies the parallel analysis each phase delegates to; `feature-challenge` is the adversarial pass; `feature-git-branch` and `feature-git-commit` keep work off the default branch and land it cleanly. `feature-config` is the guided way to set the repo-level directives that steer all of them.
 
 **Commit policy.** By default (`commitPolicy: auto`) the loop drives itself the classic way: the orchestrator commits each validated task and may push the feature branch after wave validation. Loop runs obey exactly two levers — a live in-session instruction, or a repo-root `CLAUDE.md`/`AGENTS.md` (or `CLAUDE.local.md`/`AGENTS.local.md`) line `alex-loop commit-policy: <auto|per-task|per-wave|final|manual>` (`manual` = no commits, no pushes; verified diff + proposed commit series). General "don't commit" prose in instruction files does NOT govern loop runs — set the policy line instead (the `feature-config` skill sets or clears it interactively). The rule cuts the other way too: outside a loop run, a plain "commit and push" request is ordinary git work — no alex-loop skill involvement, no policy lookup. Task subagents never commit or push under any policy; the orchestrator is the sole, serial committer.
 
-All artifacts for one feature live together in `<artifact-root>/alex-loop/YYYY-MM-DD-<topic>/`, each document type numbered independently (`01-design.md`, `01-plan.md`, `01-challenge.md`, `01-fix.md`; a big feature can carry `02-design.md`, multiple plans, and so on), so loop output stays in a single folder that cannot collide with a project's own `docs/` naming. The artifact root is `docs.local/` when that folder already exists at the repo root, `docs/` otherwise; the skills create `docs/` and the `alex-loop/` subfolder as needed but NEVER create `docs.local/` — its pre-existence is the opt-in.
+All artifacts for one feature live together in `<artifact-root>/alex-loop/YYYY-MM-DD-<topic>/` (or `YYYY-MM-DD-<ticket>-<topic>/` when the work carries a numbered ticket such as `ABC-123` or `#123` -> `gh-123`, taken from the request or the current branch name, never invented), each document type numbered independently (`01-design.md`, `01-plan.md`, `01-challenge.md`, `01-fix.md`; a big feature can carry `02-design.md`, multiple plans, and so on), so loop output stays in a single folder that cannot collide with a project's own `docs/` naming. The artifact root is `docs.local/` when that folder already exists at the repo root, `docs/` otherwise; the skills create `docs/` and the `alex-loop/` subfolder as needed but NEVER create `docs.local/` — its pre-existence is the opt-in.
 
 ## Agents
 
 | Agent | Role |
 |---|---|
-| `code-reviewer` | Read-only review subagent: type safety, regressions, YAGNI, language idioms across Python/TypeScript/JS/React/Node/Next.js, plus a GitHub PR triage mode (label/merge/comment/close actions gated by per-PR user approval). Referenced by the `use-subagents` rule; picks up `developer-python` / `developer-typescript` skills as standards when installed, falls back to its inline standards otherwise. |
+| `code-reviewer` | Read-only review subagent: type safety, regressions, YAGNI, language idioms across Python/TypeScript/JS/React/Node/Next.js, plus a GitHub PR triage mode (label/merge/comment/close actions gated by per-PR user approval). Referenced by the `use-subagents` rule; applies its inline standards, with the repository's own rules taking precedence. |
 
 Agent definitions load in Claude Code via the plugin's `agents/` directory. Codex does not document plugin-distributed agent definitions — map to a comparable reviewer setup there.
 
@@ -164,10 +197,16 @@ With the directive present, after the initial design is approved the chain self-
 
 `AskUserQuestion` in autonomous mode is reserved for mechanism 3 — a design/scope/ambiguity decision reaching it is itself the defect signal. Absent the directive, the skills behave exactly as shipped, so non-opted projects are unaffected.
 
+## Development
+
+The `worktree-add` script is written in TypeScript: the sources live in `src/worktree-add/` and their offline tests in `tests/worktree-add/` (Node's built-in test runner). Plugin users need none of this; they run the committed bundle. For development (Node 22.18 or newer): `npm ci` installs the toolchain, `npm run check` runs the type check, lint and tests, and `npm run build` regenerates the committed `plugins/alex-loop/skills/worktree-add/scripts/worktree-add.mjs`. `scripts/validate-plugin.sh` fails when the bundle is stale (it differs from a fresh build) or when `node_modules` is missing.
+
+`npm ci` also sets `core.hooksPath` to `.githooks`, whose pre-commit hook rejects a commit when the staged bundle differs from a fresh build of the staged sources; fix it with `npm run build` and stage the bundle.
+
 ## Machine-local overrides (`CLAUDE.local.md` / `AGENTS.local.md`)
 
 All directive detection reads four repo-root files: the checked-in `CLAUDE.md` / `AGENTS.md` and their machine-local `CLAUDE.local.md` / `AGENTS.local.md` variants (typically gitignored). A directive in a `.local.md` file works exactly like a committed one, but only on that machine — per-machine settings stay out of the repository.
 
-- On a value conflict (`commit-policy`, `external-models`, `design-questions`), the machine-local file overrides the checked-in one. The presence-only `autonomous` directive is ON when found in any of the four files.
+- On a value conflict (`commit-policy`, `external-models`, `design-questions`), the machine-local file overrides the checked-in one. The presence-only directives (`autonomous`, `context-watchdog: off`) take effect when found in any of the four files.
 - `feature-config` prefers the machine-local file as its write target: when a `.local.md` variant exists at the repo root, decided settings land there; the checked-in file is written only when no `.local.md` exists or the user explicitly asks for a committed setting.
 - The global `~/.claude/CLAUDE.md` / `~/.codex/AGENTS.md` are never read for directives and never written.

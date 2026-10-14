@@ -1,4 +1,4 @@
-<!-- Updated: 2026-06-13 13:47:02 UTC -->
+<!-- Updated: 2026-10-14 00:48:00 UTC -->
 
 # Verify Before Completion
 
@@ -20,7 +20,7 @@ A fix to a nearby bug is not a fix to the one the user reported. Before claiming
 
 - **Rerun the user's exact original repro** — their stated steps, not your reconstruction. "Verified live" against a repro you invented can pass while the user's path still fails.
 - **Sweep sibling surfaces for residual artifacts of the same root cause.** The same defect often shows on more than one surface; clearing one and declaring victory leaves the others for the user to find.
-- The diagnostic signal this was skipped: the user replies "that is a different problem… the problem i came with is still present," or finds a leftover artifact of the same cause immediately after your "fixed" claim.
+- The diagnostic signal this was skipped: the user replies that this is a different problem and the original one is still present, or finds a leftover artifact of the same cause immediately after your "fixed" claim.
 
 ## The Gate Function
 
@@ -60,7 +60,7 @@ For any change that affects rendered UI — components, layout, styling, accessi
 
 When asked to run or test the app, the deliverable is the real application exercised the project's prescribed way — not a stand-in that looks like progress.
 
-- **Follow the project's documented test procedure verbatim** — the test doc (TESTING.md), the designated test provider/model, the real data. Never substitute a synthetic harness, fabricated fixtures, or an ad-hoc server and present it as the deliverable. The diagnostic signal: "stop that nonsense, this is not what is needed" / "not show me a random server."
+- **Follow the project's documented test procedure verbatim** — the test doc (TESTING.md), the designated test provider/model, the real data. Never substitute a synthetic harness, fabricated fixtures, or an ad-hoc server and present it as the deliverable. The diagnostic signal: the user rejects the substitute as not what was asked for.
 - **Keep one persistent smoke/dev server up for the whole session.** Run all smokes and follow-up tests against that same instance, and never tear it down (or leave it down) when reporting status — the user inspects results there. If a status report would otherwise leave the server down, restart it and include the URL.
 
 ## Procedural docs need cold-start verification
@@ -159,4 +159,4 @@ Before recommending the user run a setup-block to verify a feature (boot runtime
 
 - Any infrastructure piece you've already informed the user is broken (image build failures, missing credentials, hook misconfigurations) must be re-flagged in the same response that proposes the repro.
 - "Try this and let me know" is not acceptable when "this" requires a step the user already told you is blocked.
-- The signal "Which you've informed about" in a user reply means you skipped this gate. Repair: lead the next response with the blocker + the alternative path (escape-hatch test, follow-up phase to unblock first, manual workaround).
+- A user reply pointing out that they already told you about the blocker means you skipped this gate. Repair: lead the next response with the blocker + the alternative path (escape-hatch test, follow-up phase to unblock first, manual workaround).

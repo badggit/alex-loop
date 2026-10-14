@@ -3,7 +3,7 @@ name: feature-challenge
 description: "Optional gate in the Alex Loop workflow (design, then plan, then implement). Stress-test a proposed design, plan, or finished branch by assuming it has already failed and working backward to find every reason why; surfaces blind spots, hidden assumptions, and concrete revisions before the work commits. Invoke ONLY when the user explicitly names this skill ('/feature-challenge', 'run feature-challenge on this') or when feature-design / feature-plan / feature-implement invoke it at their challenge gates. Do NOT self-trigger on generic phrases like 'challenge this', 'stress test this', or 'what could go wrong'."
 ---
 
-<!-- Updated: 2026-07-12 11:53:50 UTC -->
+<!-- Updated: 2026-10-14 00:48:00 UTC -->
 
 **Announce at start:** "Using skill: **Feature Challenge** to stress-test the proposed work."
 
@@ -41,6 +41,8 @@ Derive three things from available sources:
 Pull context from, in order: the saved design or plan document, the conversation transcript, referenced code files, related artifacts in the feature's `docs/alex-loop/` folder. Read aggressively before generating failure reasons.
 
 **Artifact root.** All `docs/alex-loop/` paths in this skill resolve against an artifact root: when a `docs.local/` folder already exists at the repo root, artifacts live under `docs.local/alex-loop/` instead — create the `alex-loop/` subfolder there if missing. Otherwise use `docs/alex-loop/` — create `docs/` and `docs/alex-loop/` if missing. NEVER create `docs.local/` itself: its pre-existence is the opt-in. When locating existing artifacts, check both roots.
+
+**Feature folder name.** A new feature folder is `YYYY-MM-DD-<topic>`, or `YYYY-MM-DD-<ticket>-<topic>` when the work is tied to a numbered ticket (`ABC-123` style tracker key kept verbatim, `#123` normalized to `gh-123`), taken from the user's request / skill arguments first (a key presented as the work's ticket or a tracker / GitHub issue URL - `UTF-8`, `SHA-256`, `CVE-...`, "option #2" are not tickets), then from an issue-key segment in the current branch name when that branch is not the default branch and was clearly created for this work. Never invent or ask for a key; an existing feature folder is reused as-is, never renamed. Full rule: `feature-design` -> Saving the Design.
 
 Infer when a piece is not stated explicitly. Note the inference in the saved report under an **Assumptions** section so the user can correct any wrong call. Proceed without pausing.
 
@@ -116,7 +118,7 @@ Produce the synthesis report:
 
 ### Step 5: Save the report
 
-Save the full output to the challenged artifact's feature folder as `docs/alex-loop/YYYY-MM-DD-<topic>/NN-challenge.md` (`NN` = next free two-digit prefix among `*-challenge.md` files; challenges are numbered independently of designs and plans, so the first is `01-challenge.md`. When challenging a pre-save design, create the feature folder now — the challenge is `01-challenge.md` and the design saves as `01-design.md` independently) containing:
+Save the full output to the challenged artifact's feature folder as `docs/alex-loop/YYYY-MM-DD-[<ticket>-]<topic>/NN-challenge.md` (`NN` = next free two-digit prefix among `*-challenge.md` files; challenges are numbered independently of designs and plans, so the first is `01-challenge.md`. When challenging a pre-save design, create the feature folder now — the challenge is `01-challenge.md` and the design saves as `01-design.md` independently) containing:
 
 - The context gathered (what, what it touches, success criteria)
 - An **Assumptions** section listing any inferences made during context gathering
@@ -158,7 +160,7 @@ Diagnostic signal: an implementation that "discovers" a load-bearing assumption 
 Produce one file per challenge:
 
 ```
-docs/alex-loop/YYYY-MM-DD-<topic>/NN-challenge.md
+docs/alex-loop/YYYY-MM-DD-[<ticket>-]<topic>/NN-challenge.md
 ```
 
 Plus a three-sentence chat summary so the user sees the headline without opening the file.
