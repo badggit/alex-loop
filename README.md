@@ -201,6 +201,8 @@ With the directive present, after the initial design is approved the chain self-
 
 The `worktree-add` script is written in TypeScript: the sources live in `src/worktree-add/` and their offline tests in `tests/worktree-add/` (Node's built-in test runner). Plugin users need none of this; they run the committed bundle. For development (Node 22.18 or newer): `npm ci` installs the toolchain, `npm run check` runs the type check, lint and tests, and `npm run build` regenerates the committed `plugins/alex-loop/skills/worktree-add/scripts/worktree-add.mjs`. `scripts/validate-plugin.sh` fails when the bundle is stale (it differs from a fresh build) or when `node_modules` is missing.
 
+`npm ci` also sets `core.hooksPath` to `.githooks`, whose pre-commit hook rejects a commit when the staged bundle differs from a fresh build of the staged sources; fix it with `npm run build` and stage the bundle.
+
 ## Machine-local overrides (`CLAUDE.local.md` / `AGENTS.local.md`)
 
 All directive detection reads four repo-root files: the checked-in `CLAUDE.md` / `AGENTS.md` and their machine-local `CLAUDE.local.md` / `AGENTS.local.md` variants (typically gitignored). A directive in a `.local.md` file works exactly like a committed one, but only on that machine — per-machine settings stay out of the repository.

@@ -11,7 +11,8 @@
         "lint:fix": "eslint . --max-warnings 0 --fix",
         "test": "node --test --test-timeout=120000 'tests/**/*.test.ts'",
         "build": "node scripts/buildWorktreeAdd.ts",
-        "check": "npm run typecheck && npm run lint && npm test"
+        "check": "npm run typecheck && npm run lint && npm test",
+        "prepare": "git config core.hooksPath .githooks"
     },
     "devDependencies": {
         "@eslint/js": "~9.39.4",

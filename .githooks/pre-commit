@@ -1,0 +1,37 @@
+#!/bin/sh
+# Stops a commit whose staged worktree-add bundle does not match a fresh build
+# of the staged sources. Enabled by `npm ci` (the prepare script sets
+# core.hooksPath); skip once with `git commit --no-verify`.
+set -u
+
+BUNDLE=plugins/alex-loop/skills/worktree-add/scripts/worktree-add.mjs
+
+if git diff --cached --quiet -- src/worktree-add scripts/buildWorktreeAdd.ts \
+  package-lock.json tsconfig.json "$BUNDLE"; then
+  exit 0
+fi
+
+ROOT=$(git rev-parse --show-toplevel) || exit 1
+if [ ! -d "$ROOT/node_modules" ] || ! command -v node >/dev/null 2>&1; then
+  echo "pre-commit: cannot check the worktree-add bundle: run npm ci first" >&2
+  exit 1
+fi
+
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/alex-loop-pre-commit.XXXXXX") || exit 1
+trap 'rm -rf "$TMP"' EXIT INT TERM
+
+# Build from the index, not the working tree, so unstaged edits cannot hide a stale bundle
+git checkout-index -a --prefix="$TMP/tree/" || exit 1
+ln -s "$ROOT/node_modules" "$TMP/tree/node_modules"
+if ! node "$TMP/tree/scripts/buildWorktreeAdd.ts" "$TMP/fresh.mjs" >/dev/null; then
+  echo "pre-commit: the staged worktree-add sources do not build (run npm run build)" >&2
+  exit 1
+fi
+
+if git cat-file blob ":$BUNDLE" >"$TMP/staged.mjs" 2>/dev/null &&
+  cmp -s "$TMP/fresh.mjs" "$TMP/staged.mjs"; then
+  exit 0
+fi
+echo "pre-commit: the staged worktree-add bundle does not match the staged sources." >&2
+echo "Run: npm run build && git add $BUNDLE" >&2
+exit 1

@@ -121,6 +121,11 @@ if [ "$WTA_TOOLCHAIN" -eq 1 ]; then
   npm --prefix "$ROOT" run --silent check >&2 ||
     fail "worktree-add type check, lint or tests failed (run npm run check)"
 fi
+if [ "$WTA_TOOLCHAIN" -eq 1 ]; then
+  sh "$ROOT/scripts/test-pre-commit.sh" >/dev/null ||
+    fail "pre-commit hook tests failed (run scripts/test-pre-commit.sh)"
+fi
+[ -x "$ROOT/.githooks/pre-commit" ] || fail "the pre-commit hook is missing or not executable: .githooks/pre-commit"
 if [ ! -f "$WTA_BUNDLE" ]; then
   fail "worktree-add bundle is missing: $WTA_BUNDLE_REL (run npm run build)"
 else
