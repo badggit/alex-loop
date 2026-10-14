@@ -1,10 +1,10 @@
-<!-- Updated: 2026-07-28 -->
+<!-- Updated: 2026-10-14 -->
 
 # alex-loop
 
 A plugin packaging the design-to-implementation skill chain plus the multi-agent verifier that gates it. Installs into both Claude Code and Codex — the skills use the open `SKILL.md` standard, so one skill set drives either harness.
 
-## Install (private repo, own machine)
+## Install
 
 ### Claude Code
 
@@ -154,13 +154,13 @@ The backbone is `feature-design -> feature-plan -> feature-implement`. `feature-
 
 **Commit policy.** By default (`commitPolicy: auto`) the loop drives itself the classic way: the orchestrator commits each validated task and may push the feature branch after wave validation. Loop runs obey exactly two levers — a live in-session instruction, or a repo-root `CLAUDE.md`/`AGENTS.md` (or `CLAUDE.local.md`/`AGENTS.local.md`) line `alex-loop commit-policy: <auto|per-task|per-wave|final|manual>` (`manual` = no commits, no pushes; verified diff + proposed commit series). General "don't commit" prose in instruction files does NOT govern loop runs — set the policy line instead (the `feature-config` skill sets or clears it interactively). The rule cuts the other way too: outside a loop run, a plain "commit and push" request is ordinary git work — no alex-loop skill involvement, no policy lookup. Task subagents never commit or push under any policy; the orchestrator is the sole, serial committer.
 
-All artifacts for one feature live together in `<artifact-root>/alex-loop/YYYY-MM-DD-<topic>/` (or `YYYY-MM-DD-<ticket>-<topic>/` when the work carries a numbered ticket such as `RAM-123` or `#123` -> `gh-123`, taken from the request or the current branch name, never invented), each document type numbered independently (`01-design.md`, `01-plan.md`, `01-challenge.md`, `01-fix.md`; a big feature can carry `02-design.md`, multiple plans, and so on), so loop output stays in a single folder that cannot collide with a project's own `docs/` naming. The artifact root is `docs.local/` when that folder already exists at the repo root, `docs/` otherwise; the skills create `docs/` and the `alex-loop/` subfolder as needed but NEVER create `docs.local/` — its pre-existence is the opt-in.
+All artifacts for one feature live together in `<artifact-root>/alex-loop/YYYY-MM-DD-<topic>/` (or `YYYY-MM-DD-<ticket>-<topic>/` when the work carries a numbered ticket such as `ABC-123` or `#123` -> `gh-123`, taken from the request or the current branch name, never invented), each document type numbered independently (`01-design.md`, `01-plan.md`, `01-challenge.md`, `01-fix.md`; a big feature can carry `02-design.md`, multiple plans, and so on), so loop output stays in a single folder that cannot collide with a project's own `docs/` naming. The artifact root is `docs.local/` when that folder already exists at the repo root, `docs/` otherwise; the skills create `docs/` and the `alex-loop/` subfolder as needed but NEVER create `docs.local/` — its pre-existence is the opt-in.
 
 ## Agents
 
 | Agent | Role |
 |---|---|
-| `code-reviewer` | Read-only review subagent: type safety, regressions, YAGNI, language idioms across Python/TypeScript/JS/React/Node/Next.js, plus a GitHub PR triage mode (label/merge/comment/close actions gated by per-PR user approval). Referenced by the `use-subagents` rule; picks up `developer-python` / `developer-typescript` skills as standards when installed, falls back to its inline standards otherwise. |
+| `code-reviewer` | Read-only review subagent: type safety, regressions, YAGNI, language idioms across Python/TypeScript/JS/React/Node/Next.js, plus a GitHub PR triage mode (label/merge/comment/close actions gated by per-PR user approval). Referenced by the `use-subagents` rule; applies its inline standards, with the repository's own rules taking precedence. |
 
 Agent definitions load in Claude Code via the plugin's `agents/` directory. Codex does not document plugin-distributed agent definitions — map to a comparable reviewer setup there.
 

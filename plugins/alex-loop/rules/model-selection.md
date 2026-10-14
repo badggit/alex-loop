@@ -1,4 +1,4 @@
-<!-- Updated: 2026-07-10 11:59:47 UTC -->
+<!-- Updated: 2026-10-14 00:48:00 UTC -->
 
 # Model Selection
 
@@ -10,7 +10,7 @@ Model routing is performed only by the user-facing top-level agent. A spawned le
 
 ## Rankings
 
-Higher = better. Cost reflects what the owner actually pays (OpenAI limits are generous), not list price. Intelligence is how hard a problem the model handles unsupervised. Taste covers UI/UX, code quality, API design, and copy.
+Higher = better. Cost reflects the effective cost under the subscription plans in use, not list price. Intelligence is how hard a problem the model handles unsupervised. Taste covers UI/UX, code quality, API design, and copy.
 
 | model        | tier     | cost | intelligence | taste |
 | ------------ | -------- | ---- | ------------ | ----- |

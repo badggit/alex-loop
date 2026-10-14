@@ -80,9 +80,9 @@ function tipOf(f: Fixture, ref: string): string {
 
 await test('a new worktree is created next to the main clone on a branch from main', async (t) => {
     const f = makeFixture(t);
-    const target = path.join(f.root, 'app-rep-123-oauth-login');
-    assert.equal(okPath(await run(f, ['--suffix', 'rep-123-oauth-login'])), target);
-    assert.equal(tipOf(f, 'refs/heads/rep-123-oauth-login'), tipOf(f, 'refs/heads/main'));
+    const target = path.join(f.root, 'app-abc-123-oauth-login');
+    assert.equal(okPath(await run(f, ['--suffix', 'abc-123-oauth-login'])), target);
+    assert.equal(tipOf(f, 'refs/heads/abc-123-oauth-login'), tipOf(f, 'refs/heads/main'));
     assert.ok(fs.lstatSync(path.join(target, '.env')).isFile());
     assert.equal(fs.readFileSync(path.join(target, '.env'), 'utf8'), 'A=1\n');
     assert.ok(fs.lstatSync(path.join(target, 'docs.local')).isSymbolicLink());
@@ -100,15 +100,15 @@ await test('a new worktree is created next to the main clone on a branch from ma
 
 await test('a second identical run reuses the worktree and changes nothing', async (t) => {
     const f = makeFixture(t);
-    const target = okPath(await run(f, ['--suffix', 'rep-123-oauth-login']));
+    const target = okPath(await run(f, ['--suffix', 'abc-123-oauth-login']));
     fs.writeFileSync(path.join(target, '.env'), 'local edit\n');
-    const tip = tipOf(f, 'refs/heads/rep-123-oauth-login');
+    const tip = tipOf(f, 'refs/heads/abc-123-oauth-login');
     const entries = fs.readdirSync(target).toSorted();
     f.deps.lines.length = 0;
-    assert.equal(okPath(await run(f, ['--suffix', 'rep-123-oauth-login'])), target);
+    assert.equal(okPath(await run(f, ['--suffix', 'abc-123-oauth-login'])), target);
     assert.ok(logged(f, `info reusing worktree ${target}`));
     assert.equal(fs.readFileSync(path.join(target, '.env'), 'utf8'), 'local edit\n');
-    assert.equal(tipOf(f, 'refs/heads/rep-123-oauth-login'), tip);
+    assert.equal(tipOf(f, 'refs/heads/abc-123-oauth-login'), tip);
     assert.deepEqual(fs.readdirSync(target).toSorted(), entries);
 });
 

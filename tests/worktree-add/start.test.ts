@@ -190,10 +190,10 @@ await test('logExistingBranch omits the counts without a default branch', async 
 });
 
 await test('ticketOf takes the leading key only when it ends at a dash or the end', () => {
-    assert.equal(ticketOf('rep-123-oauth-login'), 'rep-123');
+    assert.equal(ticketOf('abc-123-oauth-login'), 'abc-123');
     assert.equal(ticketOf('gh-42'), 'gh-42');
     assert.equal(ticketOf('oauth-login'), undefined);
-    assert.equal(ticketOf('rep-123x'), undefined);
+    assert.equal(ticketOf('abc-123x'), undefined);
     assert.equal(ticketOf('Rep-123'), undefined);
     // Accepted false key: harmless, it only feeds the informational listing.
     assert.equal(ticketOf('fix-2-bugs'), 'fix-2');
@@ -206,20 +206,20 @@ await test('logSameTicket lists other worktrees of the same ticket only', async 
         gitSync(f.env, ['-C', f.main, 'worktree', 'add', '--quiet', '-b', branch, dir]);
         return dir;
     };
-    const other = add('app-rep-123-other', 'rep-123-other');
-    add('app-rep-1234-x', 'rep-1234-x');
-    const ending = add('app-rep-123', 'rep-123');
-    const target = add('app-rep-123-login', 'rep-123-login');
+    const other = add('app-abc-123-other', 'abc-123-other');
+    add('app-abc-1234-x', 'abc-1234-x');
+    const ending = add('app-abc-123', 'abc-123');
+    const target = add('app-abc-123-login', 'abc-123-login');
     const deps = testDeps(f.env);
-    await logSameTicket(deps, f.main, 'rep-123-login', target);
+    await logSameTicket(deps, f.main, 'abc-123-login', target);
     assert.equal(deps.lines.length, 1);
-    const prefix = 'info other worktrees for ticket rep-123: ';
+    const prefix = 'info other worktrees for ticket abc-123: ';
     const message = messageOf(deps.lines[0] ?? '');
     assert.ok(message.startsWith(prefix), message);
     // The listing keeps git's worktree order, which is not pinned here.
     assert.deepEqual(message.slice(prefix.length).split(', ').toSorted(), [
-        `${ending} (rep-123)`,
-        `${other} (rep-123-other)`,
+        `${ending} (abc-123)`,
+        `${other} (abc-123-other)`,
     ]);
 });
 

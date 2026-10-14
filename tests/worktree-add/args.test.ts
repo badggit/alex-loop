@@ -10,7 +10,7 @@ import { gitVersionProblem, nodeVersionProblem } from '../../src/worktree-add/ve
 import { tempRoot } from './support/tmp.ts';
 
 const HOME = '/home/test';
-const SUFFIX = 'rep-123-oauth-login';
+const SUFFIX = 'abc-123-oauth-login';
 
 function usageMessage(argv: readonly string[]): string {
     const parsed = parseArgs(argv, HOME);

@@ -4,7 +4,7 @@ description: "Fast path for scoped changes with a KNOWN intended end-state — b
 argument-hint: "<bug report or scoped change request>"
 ---
 
-<!-- Updated: 2026-07-12 12:05:33 UTC -->
+<!-- Updated: 2026-10-14 00:48:00 UTC -->
 
 **Announce at start:** "Using skill: **Feature Fix** to reproduce, root-cause, and land a minimal verified fix."
 
@@ -24,7 +24,7 @@ The scoped-change path. The intended end-state is already known, so there is no 
 
 **Artifact root.** All `docs/alex-loop/` paths in this skill resolve against an artifact root: when a `docs.local/` folder already exists at the repo root, artifacts live under `docs.local/alex-loop/` instead — create the `alex-loop/` subfolder there if missing. Otherwise use `docs/alex-loop/` — create `docs/` and `docs/alex-loop/` if missing. NEVER create `docs.local/` itself: its pre-existence is the opt-in. When locating existing artifacts, check both roots.
 
-**Feature folder name.** A new feature folder is `YYYY-MM-DD-<topic>`, or `YYYY-MM-DD-<ticket>-<topic>` when the work is tied to a numbered ticket (`RAM-123` style tracker key kept verbatim, `#123` normalized to `gh-123`), taken from the user's request / skill arguments first (a key presented as the work's ticket or a tracker / GitHub issue URL - `UTF-8`, `SHA-256`, `CVE-...`, "option #2" are not tickets), then from an issue-key segment in the current branch name when that branch is not the default branch and was clearly created for this work. Never invent or ask for a key; an existing feature folder is reused as-is, never renamed. Full rule: `feature-design` -> Saving the Design.
+**Feature folder name.** A new feature folder is `YYYY-MM-DD-<topic>`, or `YYYY-MM-DD-<ticket>-<topic>` when the work is tied to a numbered ticket (`ABC-123` style tracker key kept verbatim, `#123` normalized to `gh-123`), taken from the user's request / skill arguments first (a key presented as the work's ticket or a tracker / GitHub issue URL - `UTF-8`, `SHA-256`, `CVE-...`, "option #2" are not tickets), then from an issue-key segment in the current branch name when that branch is not the default branch and was clearly created for this work. Never invent or ask for a key; an existing feature folder is reused as-is, never renamed. Full rule: `feature-design` -> Saving the Design.
 
 **Attempt hygiene.** Before the first edit of each fix attempt, snapshot your starting point (`git diff > <scratch>/attempt-N.patch` plus the list of files you are about to touch). A failed attempt is rolled back by restoring exactly those files — never by a blanket revert of the working tree, which cannot distinguish your edits from the user's parallel work.
 

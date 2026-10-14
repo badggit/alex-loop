@@ -144,7 +144,7 @@ export async function logExistingBranch(deps: Deps, main: string, branch: string
     deps.log.info(counts === undefined ? head : `${head}, ${counts}`);
 }
 
-// The leading tracker key such as rep-123 or gh-42; fix-2-bugs yields fix-2, harmless for an informational listing.
+// The leading tracker key such as abc-123 or gh-42; fix-2-bugs yields fix-2, harmless for an informational listing.
 export function ticketOf(suffix: string): string | undefined {
     return TICKET.exec(suffix)?.[1];
 }
