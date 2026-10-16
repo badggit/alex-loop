@@ -1,7 +1,8 @@
 import path from 'node:path';
 
-import { isAtOrAbove } from './assign.ts';
 import { removalCommand, removeSafely } from './cleanup.ts';
+import type { Ecosystem, Project } from './discover.ts';
+import { isAtOrAbove, JS_DEPS } from './paths.ts';
 import { clearPartialMarks, readPartialMarks } from './privateArea.ts';
 import { showText } from './text.ts';
 import type { Deps } from './types.ts';
@@ -14,16 +15,30 @@ export interface LeftoverScope {
 
 export type LeftoverResult = { ok: true } | { ok: false; failed: readonly string[]; problem: string };
 
-// The project folder that owns a marked path: the longest one at or above it, so a nested project's leftover is
-// never the root's. Undefined when no project folder is at or above it.
-export function markOwner(projectDirs: readonly string[], rel: string): string | undefined {
-    let best: string | undefined;
-    for (const dir of projectDirs) {
-        if (isAtOrAbove(dir, rel) && (best === undefined || dir.length > best.length)) {
-            best = dir;
+export type ProjectSite = Pick<Project, 'dir' | 'ecosystem'>;
+
+function deepestAbove(sites: readonly ProjectSite[], rel: string): ProjectSite | undefined {
+    let best: ProjectSite | undefined;
+    for (const site of sites) {
+        if (isAtOrAbove(site.dir, rel) && (best === undefined || site.dir.length > best.dir.length)) {
+            best = site;
         }
     }
     return best;
+}
+
+// The project that owns a marked path: the deepest one at or above it of the path's own ecosystem (node_modules is
+// the JS project's, a Python environment the uv project's), so neither a nested project's leftover nor one of the
+// other ecosystem in the same folder is ever its. With no such project the deepest one of any ecosystem takes it, so
+// a mark whose project is gone from this branch is still cleared. Undefined when no project is at or above it.
+export function markOwner(sites: readonly ProjectSite[], rel: string): ProjectSite | undefined {
+    const ecosystem: Ecosystem = path.posix.basename(rel) === JS_DEPS ? 'js' : 'uv';
+    return (
+        deepestAbove(
+            sites.filter((site) => site.ecosystem === ecosystem),
+            rel
+        ) ?? deepestAbove(sites, rel)
+    );
 }
 
 // Removes the marked paths of an earlier interrupted or failed install that OWNS accepts and drops them from the

@@ -223,6 +223,26 @@ await test('a stub yarn 1 against a berry expectation is a mismatch', async (t) 
     assert.deepEqual(check, { kind: 'mismatch', expected: 'yarn 2 or newer', found: '1.22.22' });
 });
 
+await test('an npm pin of another major only differs, while a pnpm pin of another major is a mismatch', async (t) => {
+    const binDir = path.join(tempRoot(t), 'bin');
+    writeStubTool(binDir, 'npm', 'echo 11.2.0');
+    writeStubTool(binDir, 'pnpm', 'echo 9.15.0');
+    const npmDir = project(t, {
+        'package.json': JSON.stringify({ packageManager: 'npm@10.8.2' }),
+        'package-lock.json': '{}\n',
+    });
+    const npmExpected = expectVersion(chooseManager(npmDir, 'js', ['package-lock.json']), 'npm');
+    const npmCheck = await checkManagerVersion(testDeps(stubEnv(binDir)), 'npm', npmExpected, npmDir);
+    assert.deepEqual(npmCheck, { kind: 'differs', expected: 'npm 10', found: '11.2.0' });
+    const pnpmDir = project(t, {
+        'package.json': JSON.stringify({ packageManager: 'pnpm@10.0.0' }),
+        'pnpm-lock.yaml': "lockfileVersion: '9.0'\n",
+    });
+    const pnpmExpected = expectVersion(chooseManager(pnpmDir, 'js', ['pnpm-lock.yaml']), 'pnpm');
+    const pnpmCheck = await checkManagerVersion(testDeps(stubEnv(binDir)), 'pnpm', pnpmExpected, pnpmDir);
+    assert.deepEqual(pnpmCheck, { kind: 'mismatch', expected: 'pnpm 10', found: '9.15.0' });
+});
+
 await test('the version query runs in the project folder and parses uv output', async (t) => {
     const binDir = path.join(tempRoot(t), 'bin');
     const dir = tempRoot(t);

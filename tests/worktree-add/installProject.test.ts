@@ -74,7 +74,7 @@ async function makeFixture(
         main,
         worktree,
         privateDir: await privateDir(deps, worktree),
-        projectDirs: [''],
+        projects: [{ dir: '', ecosystem: 'js' }],
         nowMs: () => Date.now(),
         networkTimeoutMs: 30_000,
         progressMs: 60_000,
@@ -235,7 +235,13 @@ await test('a leftover of a nested project neither blocks nor is removed by the 
     fs.chmodSync(locked, 0o500);
     fs.writeFileSync(path.join(fixture.ctx.privateDir ?? '', PARTIAL_MARKER), 'services/api/.venv\n');
     try {
-        const ctx: ProjectContext = { ...fixture.ctx, projectDirs: ['', 'services/api'] };
+        const ctx: ProjectContext = {
+            ...fixture.ctx,
+            projects: [
+                { dir: '', ecosystem: 'js' },
+                { dir: 'services/api', ecosystem: 'uv' },
+            ],
+        };
         const outcome = await install(ctx, rootProject(), minuteAhead());
         assert.deepEqual(outcome, { kind: 'installed' }, fixture.deps.lines.join('\n'));
         assert.deepEqual(linesWith(fixture, 'cannot remove the partial install'), []);
@@ -566,5 +572,120 @@ await test('a lock file that cannot be restored after the install gets its own w
         assert.equal(fs.readFileSync(lock, 'utf8'), '{}\n');
     } finally {
         fs.chmodSync(lock, 0o644);
+    }
+});
+
+await test('a listing that fails before the install leaves the own link in place', async (t) => {
+    const fixture = await npmFixture(t, 'mkdir -p node_modules/x\nexit 0');
+    const link = path.join(fixture.worktree, 'node_modules');
+    fs.symlinkSync(path.join(fixture.main, 'node_modules'), link);
+    const failed = { code: 128, stdout: '', stderr: 'fatal: index file corrupt\n' };
+    const ctx: ProjectContext = {
+        ...fixture.ctx,
+        deps: { ...fixture.deps, runner: withOverride(fixture.deps.runner, isListing, failed) },
+    };
+    const outcome = await install(ctx, rootProject(), minuteAhead());
+    assert.deepEqual(outcome, { kind: 'not-installed' });
+    assert.equal(linesWith(fixture, 'cannot list the untracked entries of ').length, 1, fixture.deps.lines.join('\n'));
+    assert.equal(fs.readlinkSync(link), path.join(fixture.main, 'node_modules'));
+    assert.deepEqual(installCalls(fixture), []);
+});
+
+await test('a failed install puts back the own link it removed and says how to remove it', async (t) => {
+    const fixture = await npmFixture(t, 'mkdir -p node_modules/partial\necho "npm error code E401" >&2\nexit 1');
+    fs.mkdirSync(path.join(fixture.main, 'node_modules', 'kept'), { recursive: true });
+    const link = path.join(fixture.worktree, 'node_modules');
+    fs.symlinkSync(path.join(fixture.main, 'node_modules'), link);
+    const outcome = await install(fixture.ctx, rootProject(), minuteAhead());
+    assert.deepEqual(outcome, { kind: 'failed' });
+    assert.equal(fs.readlinkSync(link), path.join(fixture.main, 'node_modules'));
+    assert.deepEqual(fs.readdirSync(path.join(fixture.main, 'node_modules')), ['kept']);
+    const restored = linesWith(
+        fixture,
+        ' warn not installed with npm: the earlier link was restored for node_modules; '
+    );
+    assert.equal(restored.length, 1, fixture.deps.lines.join('\n'));
+    assert.ok(restored[0]?.endsWith(`remove it with rm -- '${link}' before installing`), restored[0]);
+    assert.deepEqual(linesWith(fixture, 'is left missing'), []);
+    assert.deepEqual(markerOf(fixture), []);
+});
+
+await test('a failed install makes no link where none stood before', async (t) => {
+    const fixture = await npmFixture(t, 'mkdir -p node_modules/partial\nexit 1');
+    const outcome = await install(fixture.ctx, rootProject(), minuteAhead());
+    assert.deepEqual(outcome, { kind: 'failed' });
+    assert.equal(lstatOrUndefined(path.join(fixture.worktree, 'node_modules')), undefined);
+    assert.deepEqual(linesWith(fixture, 'the earlier link was restored'), []);
+    assert.equal(linesWith(fixture, 'node_modules is left missing').length, 1, fixture.deps.lines.join('\n'));
+});
+
+await test('an npm pin of another major installs anyway with one info line naming both versions', async (t) => {
+    const fixture = await makeFixture(
+        t,
+        { 'package.json': '{"packageManager":"npm@11.2.0"}\n', 'package-lock.json': NPM_LOCK },
+        { npm: `${NPM_VERSION}\nmkdir -p node_modules/x\nexit 0` }
+    );
+    const outcome = await install(fixture.ctx, rootProject(), minuteAhead());
+    assert.deepEqual(outcome, { kind: 'installed' }, fixture.deps.lines.join('\n'));
+    assert.deepEqual(
+        fixture.deps.lines.filter((line) => line.includes('packageManager')).map((line) => line.slice(21)),
+        [
+            'info installing with npm although package.json packageManager names npm 11, found 10.9.0 ' +
+                '(npm does not enforce packageManager)',
+        ]
+    );
+    assert.deepEqual(linesWith(fixture, 'wrong manager version'), []);
+});
+
+await test('a pnpm pin of another major still blocks the install', async (t) => {
+    const fixture = await makeFixture(
+        t,
+        { 'package.json': '{"packageManager":"pnpm@10.0.0"}\n', 'pnpm-lock.yaml': "lockfileVersion: '9.0'\n" },
+        { pnpm: 'case "$1" in --version) echo 9.15.0; exit 0;; esac\nmkdir -p node_modules\nexit 0' }
+    );
+    const outcome = await install(fixture.ctx, rootProject(['pnpm-lock.yaml']), minuteAhead());
+    assert.deepEqual(outcome, { kind: 'not-installed' });
+    assert.equal(linesWith(fixture, 'cannot install dependencies with pnpm: wrong manager version').length, 1);
+    assert.deepEqual(installCalls(fixture), []);
+});
+
+await test('a stuck node_modules leftover does not block the uv project in the same folder', async (t) => {
+    if (process.getuid?.() === 0) {
+        t.skip('root can remove a folder with mode 0500');
+        return;
+    }
+    const fixture = await makeFixture(
+        t,
+        { 'package.json': '{"name":"demo"}\n', 'package-lock.json': NPM_LOCK, 'uv.lock': 'version = 1\n' },
+        { uv: 'case "$1" in --version) echo "uv 0.5.0"; exit 0;; esac\nmkdir -p .venv\nexit 0' }
+    );
+    const locked = path.join(fixture.worktree, 'node_modules', 'locked');
+    fs.mkdirSync(locked, { recursive: true });
+    fs.writeFileSync(path.join(locked, 'file'), 'stale\n');
+    fs.chmodSync(locked, 0o500);
+    fs.writeFileSync(path.join(fixture.ctx.privateDir ?? '', PARTIAL_MARKER), 'node_modules\n');
+    const uvProject: AssignedProject = {
+        dir: '',
+        ecosystem: 'uv',
+        lockNames: ['uv.lock'],
+        depRels: ['.venv'],
+        linkOnly: [],
+        auto: true,
+    };
+    try {
+        const ctx: ProjectContext = {
+            ...fixture.ctx,
+            projects: [
+                { dir: '', ecosystem: 'js' },
+                { dir: '', ecosystem: 'uv' },
+            ],
+        };
+        const outcome = await install(ctx, uvProject, minuteAhead());
+        assert.deepEqual(outcome, { kind: 'installed' }, fixture.deps.lines.join('\n'));
+        assert.deepEqual(linesWith(fixture, 'cannot remove the partial install'), []);
+        assert.deepEqual(markerOf(fixture), ['node_modules']);
+        assert.ok(lstatOrUndefined(path.join(fixture.worktree, '.venv'))?.isDirectory());
+    } finally {
+        fs.chmodSync(locked, 0o700);
     }
 });

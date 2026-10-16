@@ -9,6 +9,8 @@ export interface ExpectedVersion {
     // For messages, for example 'yarn 2 or newer'.
     text: string;
     accepts(_major: number): boolean;
+    // npm ignores packageManager, so a pin it does not match is only reported and the install still runs.
+    advisory?: true;
 }
 
 export type ManagerChoice =
@@ -16,7 +18,10 @@ export type ManagerChoice =
     | { kind: 'conflict'; reason: string };
 
 export type VersionCheck =
-    { kind: 'ok'; version: string } | { kind: 'missing' } | { kind: 'mismatch'; expected: string; found: string };
+    | { kind: 'ok'; version: string }
+    | { kind: 'missing' }
+    | { kind: 'mismatch'; expected: string; found: string }
+    | { kind: 'differs'; expected: string; found: string };
 
 type JsFamily = 'npm' | 'pnpm' | 'yarn' | 'bun';
 
@@ -51,6 +56,7 @@ const FAMILY_LOCKS: Readonly<Record<JsFamily, readonly string[]>> = {
     bun: ['bun.lock', 'bun.lockb'],
 };
 
+// The single manager-to-binary mapping: the version check and the install both start this binary.
 const EXECUTABLES: Readonly<Record<ManagerName, string>> = {
     npm: 'npm',
     pnpm: 'pnpm',
@@ -219,7 +225,8 @@ function fromPin(projectDir: string, pin: PinnedManager, lockNames: readonly str
     } else {
         manager = family;
     }
-    return { kind: 'manager', manager, expected: exactMajor(pin.family, pin.major) };
+    const expected = exactMajor(pin.family, pin.major);
+    return { kind: 'manager', manager, expected: family === 'npm' ? { ...expected, advisory: true } : expected };
 }
 
 export function chooseManager(projectDir: string, ecosystem: Ecosystem, lockNames: readonly string[]): ManagerChoice {
@@ -290,7 +297,7 @@ export async function checkManagerVersion(
         return { kind: 'mismatch', expected: expectedText, found: 'unknown (no version in --version output)' };
     }
     if (expected !== undefined && !expected.accepts(Number(major))) {
-        return { kind: 'mismatch', expected: expected.text, found: version };
+        return { kind: expected.advisory === true ? 'differs' : 'mismatch', expected: expected.text, found: version };
     }
     return { kind: 'ok', version };
 }

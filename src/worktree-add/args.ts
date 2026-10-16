@@ -83,6 +83,9 @@ export function parseArgs(argv: readonly string[], home: string): ParsedArgs {
         if (value === undefined) {
             return usage(`missing value for ${arg}`);
         }
+        if (value.startsWith('--')) {
+            return usage(`missing value for ${arg}: got the option ${showText(value)}`);
+        }
         values[arg] = value;
         index += 1;
     }

@@ -1,7 +1,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { errorCode, isOwnLink, JS_DEPS, lstatOrUndefined, parentExists, parentInside } from './paths.ts';
+import {
+    errorCode,
+    isOwnLink,
+    JS_DEPS,
+    lstatOrUndefined,
+    missingOrOwnLink,
+    parentExists,
+    parentInside,
+} from './paths.ts';
 import { showText } from './text.ts';
 import type { Deps, EntryTransfer } from './types.ts';
 
@@ -51,13 +59,17 @@ function ensureLink(run: FallbackRun, rel: string): FallbackKind {
     return result === 'created' ? 'linked' : 'failed';
 }
 
-// The transfer replaces an own link standing at the destination with the clone and restores it when that fails.
+// The transfer replaces an own link standing at the destination with the clone and restores it when that fails. A
+// link made because copy-on-write is unavailable says why, so it is told apart from an unexpected one.
 async function cloneOrLink(run: FallbackRun, rel: string): Promise<FallbackKind> {
     const outcome = await run.transfer.cloneDependency(rel);
     if (outcome.kind === 'cloned') {
         return 'cloned';
     }
     const kind = ensureLink(run, rel);
+    if (outcome.kind === 'unavailable' && kind === 'linked') {
+        run.deps.log.info(`linked ${showText(rel)}: ${showText(outcome.reason)}`);
+    }
     if (outcome.kind === 'failed') {
         const fallback = kind === 'linked' ? '; linked it instead' : '';
         run.deps.log.warn(`cannot clone ${showText(rel)} into the worktree (${showText(outcome.reason)})${fallback}`);
@@ -65,16 +77,12 @@ async function cloneOrLink(run: FallbackRun, rel: string): Promise<FallbackKind>
     return kind;
 }
 
-function destinationOpen(run: FallbackRun, rel: string): boolean {
-    return lstatOrUndefined(path.join(run.worktree, rel)) === undefined || isOwnLink(run, rel);
-}
-
 // Only node_modules is cloned: other dependency folders (a venv) keep the main clone's absolute paths when copied.
 async function fallbackFor(run: FallbackRun, rel: string): Promise<FallbackKind> {
     if (!parentExists(run.worktree, rel)) {
         return 'no-parent';
     }
-    if (!parentInside(run.worktree, rel) || !destinationOpen(run, rel)) {
+    if (!parentInside(run.worktree, rel) || !missingOrOwnLink(run, rel)) {
         return 'present';
     }
     if (path.posix.basename(rel) === JS_DEPS) {

@@ -107,6 +107,14 @@ await test('parseArgs refuses missing, unknown, repeated and valueless options',
     assert.match(usageMessage(['--suffix', 'x', '--branch', 'b']), /unknown option: --branch/u);
     assert.match(usageMessage(['--suffix', 'x', '--suffix', 'y']), /--suffix can be given only once/u);
     assert.match(usageMessage(['--suffix']), /missing value for --suffix/u);
+    assert.match(
+        usageMessage(['--suffix', 'x', '--parent', '--no-install']),
+        /missing value for --parent: got the option --no-install/u
+    );
+    assert.match(
+        usageMessage(['--suffix', '--parent', '/tmp']),
+        /missing value for --suffix: got the option --parent/u
+    );
     assert.match(usageMessage(['--suffix', 'x', 'extra']), /unexpected argument: extra/u);
 });
 

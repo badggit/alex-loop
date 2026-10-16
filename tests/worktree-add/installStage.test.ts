@@ -4,6 +4,7 @@ import path from 'node:path';
 import { test, type TestContext } from 'node:test';
 
 import { createCloneGate } from '../../src/worktree-add/cowGate.ts';
+import { TEMP_PATTERN } from '../../src/worktree-add/exclude.ts';
 import {
     DEFAULT_TIMING,
     runInstallStage,
@@ -35,6 +36,8 @@ const MANAGERS: ReadonlySet<string> = new Set(['npm', 'pnpm', 'yarn', 'bun', 'uv
 const ROOT_NPM = { 'package.json': '{"name":"demo"}\n', 'package-lock.json': NPM_LOCK };
 const NPM_CONFIG_STUB = 'case "$1" in --version) echo 10.9.0; exit 0;; esac\ngit config core.hooksPath x\nexit 0';
 const NPM_CONFIG_FAIL_STUB = 'case "$1" in --version) echo 10.9.0; exit 0;; esac\ngit config core.hooksPath x\nexit 1';
+// The gate in these fixtures never offers copy-on-write, so every node_modules fallback is a link with this reason.
+const NO_COW_LINE = 'linked node_modules: no copy-on-write between the clone and the worktree';
 const NOT_REVERTED = 'cannot read the shared repository config; changes made by installs to it are not reverted';
 
 interface Logged {
@@ -289,6 +292,8 @@ await test('a root npm project and a uv project install in order; a project with
     const exclude = new Set(sharedExclude(fixture).split('\n'));
     assert.ok(exclude.has('/node_modules'));
     assert.ok(exclude.has('/services/api/.venv'));
+    // The stage, not the sync, writes the temp pattern a dependency clone needs.
+    assert.ok(exclude.has(TEMP_PATTERN));
 });
 
 await test('a Python environment of a uv project other than its .venv is linked with its line', async (t) => {
@@ -319,7 +324,7 @@ await test('a dependency folder whose parent folder is missing in the worktree i
     });
     await runInstallStage(fixture.request);
     assert.deepEqual(warnings(fixture), [
-        'not installed: tools/x/node_modules belongs to no project with a supported lock file; ' +
+        'not installed: tools/x/node_modules is outside the workspaces of the JS project in the worktree root; ' +
             'skipped: tools/x does not exist in the worktree',
         'not installed: services/api/tools/env belongs to the uv project in services/api, ' +
             'which installs only its own .venv; skipped: services/api/tools does not exist in the worktree',
@@ -337,6 +342,7 @@ await test('--no-install skips a dependency folder whose parent folder is missin
     });
     await runInstallStage(fixture.request);
     assert.deepEqual(infos(fixture), [
+        NO_COW_LINE,
         'installs skipped (--no-install): linked node_modules; ' +
             'skipped tools/x/node_modules (the parent folder does not exist in the worktree)',
     ]);
@@ -354,7 +360,7 @@ await test('--no-install removes a marked half-installed folder before linking i
     fs.writeFileSync(path.join(gitDirOf(fixture), PARTIAL_MARKER), 'node_modules\n');
     await runInstallStage(fixture.request);
     assertOwnLink(fixture, 'node_modules');
-    assert.deepEqual(infos(fixture), ['installs skipped (--no-install): linked node_modules']);
+    assert.deepEqual(infos(fixture), [NO_COW_LINE, 'installs skipped (--no-install): linked node_modules']);
     assert.deepEqual(readPartialMarks(gitDirOf(fixture)), []);
 });
 
@@ -370,7 +376,7 @@ await test('--no-install links the dependency folders and calls no manager', asy
     assert.deepEqual(managerCalls(fixture), []);
     assertOwnLink(fixture, 'node_modules');
     assertOwnLink(fixture, '.venv');
-    assert.deepEqual(infos(fixture), ['installs skipped (--no-install): linked node_modules, .venv']);
+    assert.deepEqual(infos(fixture), [NO_COW_LINE, 'installs skipped (--no-install): linked node_modules, .venv']);
     assert.deepEqual(warnings(fixture), []);
 });
 
@@ -414,6 +420,7 @@ await test('a disabled sandbox network skips installs, links every folder and na
         assertOwnLink(fixture, rel);
     }
     assert.deepEqual(infos(fixture), [
+        NO_COW_LINE,
         'installs skipped: the network is disabled in this sandbox; linked node_modules, services/api/.venv; ' +
             'to install later, remove the linked folders first (rm PATH, no trailing slash), then run in the worktree: ' +
             'npm ci; cd services/api && uv sync --frozen',
@@ -436,6 +443,7 @@ await test('a disabled sandbox network with only an orphan names no command', as
     assert.deepEqual(managerCalls(fixture), []);
     assertOwnLink(fixture, 'node_modules');
     assert.deepEqual(infos(fixture), [
+        NO_COW_LINE,
         'installs skipped: the network is disabled in this sandbox; run later in the worktree: uv sync --frozen',
     ]);
     assert.equal(warnings(fixture).filter((line) => line.includes('node_modules')).length, 1, dump(fixture));
@@ -468,7 +476,7 @@ await test('--no-install wins over the sandbox switch', async (t) => {
     });
     await runInstallStage(fixture.request);
     assertOwnLink(fixture, 'node_modules');
-    assert.deepEqual(infos(fixture), ['installs skipped (--no-install): linked node_modules']);
+    assert.deepEqual(infos(fixture), [NO_COW_LINE, 'installs skipped (--no-install): linked node_modules']);
 });
 
 await test('a missing pnpm links node_modules and an orphan venv is linked with its warning', async (t) => {
@@ -730,7 +738,7 @@ await test('a nested node_modules outside any workspace does not block the root 
         dump(fixture)
     );
     assert.deepEqual(warnings(fixture), [
-        'not installed: tools/x/node_modules belongs to no project with a supported lock file; ' +
+        'not installed: tools/x/node_modules is outside the workspaces of the JS project in the worktree root; ' +
             'it already stands in the worktree and is left as it is',
     ]);
     assert.equal(fs.readFileSync(path.join(nested, 'own.txt'), 'utf8'), 'own\n');

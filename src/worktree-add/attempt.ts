@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 
+import { executableOf } from './managers.ts';
 import { errorCode } from './paths.ts';
 import { messageOf } from './text.ts';
 import type { CommandResult, Deps, Env, ManagerName } from './types.ts';
@@ -31,7 +32,6 @@ export interface AttemptResult {
 }
 
 interface ManagerCommands {
-    file: string;
     shown: string;
     offline: readonly string[] | undefined;
     offlineMissSignals: readonly string[];
@@ -71,7 +71,6 @@ function uvEnv(timeoutMs: number): Env {
 
 const COMMANDS: Readonly<Record<ManagerName, ManagerCommands>> = {
     npm: {
-        file: 'npm',
         shown: 'npm ci',
         offline: ['ci', '--offline'],
         offlineMissSignals: ['ENOTCACHED'],
@@ -80,7 +79,6 @@ const COMMANDS: Readonly<Record<ManagerName, ManagerCommands>> = {
         onlineEnv: NO_ENV,
     },
     pnpm: {
-        file: 'pnpm',
         shown: 'pnpm install --frozen-lockfile',
         offline: ['install', '--frozen-lockfile', '--offline'],
         offlineMissSignals: ['ERR_PNPM_NO_OFFLINE_TARBALL', 'ERR_PNPM_NO_OFFLINE_META'],
@@ -89,7 +87,6 @@ const COMMANDS: Readonly<Record<ManagerName, ManagerCommands>> = {
         onlineEnv: NO_ENV,
     },
     'yarn-classic': {
-        file: 'yarn',
         shown: 'yarn install --frozen-lockfile',
         offline: ['install', '--frozen-lockfile', '--offline'],
         offlineMissSignals: ["Couldn't find any versions", "Can't make a request in offline mode"],
@@ -98,7 +95,6 @@ const COMMANDS: Readonly<Record<ManagerName, ManagerCommands>> = {
         onlineEnv: NO_ENV,
     },
     'yarn-berry': {
-        file: 'yarn',
         shown: 'yarn install --immutable',
         offline: undefined,
         offlineMissSignals: [],
@@ -107,7 +103,6 @@ const COMMANDS: Readonly<Record<ManagerName, ManagerCommands>> = {
         onlineEnv: (timeoutMs) => ({ YARN_HTTP_TIMEOUT: String(timeoutMs), YARN_HTTP_RETRY: '1' }),
     },
     bun: {
-        file: 'bun',
         shown: 'bun install --frozen-lockfile',
         offline: undefined,
         offlineMissSignals: [],
@@ -116,7 +111,6 @@ const COMMANDS: Readonly<Record<ManagerName, ManagerCommands>> = {
         onlineEnv: NO_ENV,
     },
     uv: {
-        file: 'uv',
         shown: 'uv sync --frozen',
         offline: ['sync', '--frozen', '--offline'],
         // The last one is uv's hint when the project's Python must be downloaded, which offline mode forbids.
@@ -205,14 +199,13 @@ async function runWithProgress(
     attempt: Attempt,
     firstStartMs: number
 ): Promise<CommandResult> {
-    const commands = COMMANDS[request.manager];
     const timer = setInterval(() => {
         const seconds = Math.floor((request.nowMs() - firstStartMs) / 1000);
         deps.log.info(`still installing with ${request.label} (${seconds} s)`);
     }, request.progressMs);
     try {
         return await deps.runner.run({
-            file: commands.file,
+            file: executableOf(request.manager),
             args: attempt.args,
             cwd: request.projectDir,
             env: attempt.env,

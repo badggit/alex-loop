@@ -145,3 +145,20 @@ await test('matchesWorkspaceGlob follows the single-segment, multi-segment and s
     assert.equal(matchesWorkspaceGlob('a/**', 'a/b/c'), true);
     assert.equal(matchesWorkspaceGlob('a.b', 'axb'), false);
 });
+
+await test('matchesWorkspaceGlob expands flat brace sets and character classes', () => {
+    assert.equal(matchesWorkspaceGlob('packages/{app,lib}', 'packages/app'), true);
+    assert.equal(matchesWorkspaceGlob('packages/{app,lib}', 'packages/lib'), true);
+    assert.equal(matchesWorkspaceGlob('packages/{app,lib}', 'packages/other'), false);
+    assert.equal(matchesWorkspaceGlob('{apps,libs}/*-{web,api}', 'libs/x-api'), true);
+    assert.equal(matchesWorkspaceGlob('pkg-[ab]', 'pkg-a'), true);
+    assert.equal(matchesWorkspaceGlob('pkg-[ab]', 'pkg-b'), true);
+    assert.equal(matchesWorkspaceGlob('pkg-[ab]', 'pkg-c'), false);
+    assert.equal(matchesWorkspaceGlob('pkg-[a-c]', 'pkg-c'), true);
+    assert.equal(matchesWorkspaceGlob('pkg-[a-c]', 'pkg-d'), false);
+    assert.equal(matchesWorkspaceGlob('pkg-[!a]', 'pkg-a'), false);
+    assert.equal(matchesWorkspaceGlob('pkg-[^a]', 'pkg-b'), true);
+    assert.equal(matchesWorkspaceGlob('pkg-{x}', 'pkg-{x}'), true);
+    assert.equal(matchesWorkspaceGlob('pkg-[', 'pkg-['), true);
+    assert.equal(matchesWorkspaceGlob('pkg-[c-a]', 'pkg-b'), false);
+});

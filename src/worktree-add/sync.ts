@@ -2,7 +2,7 @@ import path from 'node:path';
 
 import { addExcludePatterns, anchoredPattern, TEMP_PATTERN } from './exclude.ts';
 import { makeLink } from './fallback.ts';
-import { isOwnLink, JS_DEPS, lstatOrUndefined, parentInside } from './paths.ts';
+import { isOwnLink, JS_DEPS, lstatOrUndefined, missingOrOwnLink, parentInside } from './paths.ts';
 import { hasControlCharacter, showText } from './text.ts';
 import type { Deps, EntryTransfer } from './types.ts';
 
@@ -100,10 +100,7 @@ function usableEntries(deps: Deps, rels: readonly string[]): string[] {
 
 // An own link may stand where a copy belongs: the transfer replaces it with the real file.
 function destinationOpen(run: SyncRun, rel: string, kind: EntryClass): boolean {
-    if (lstatOrUndefined(path.join(run.worktree, rel)) === undefined) {
-        return true;
-    }
-    return kind !== 'link' && isOwnLink(run, rel);
+    return kind === 'copy' ? missingOrOwnLink(run, rel) : lstatOrUndefined(path.join(run.worktree, rel)) === undefined;
 }
 
 // Dependency folders are left to the install stage, which installs them or clones or links them from the main clone.
@@ -150,13 +147,14 @@ export async function syncIgnored(
     const listed = await listIgnored(deps, main);
     if (listed === undefined) {
         deps.log.warn(
-            `cannot list the ignored files of ${showText(main)}; nothing synced into the worktree and the dependency fallback is skipped`
+            `cannot list the ignored files of ${showText(main)}; nothing synced into the worktree, the dependency fallback is skipped and nested projects are not installed automatically`
         );
         return undefined;
     }
     const entries = usableEntries(deps, listed).map((rel) => ({ rel, kind: entryClass(main, rel) }));
     const run: SyncRun = { deps, main, worktree, transfer, linked: [] };
-    if (entries.some((entry) => entry.kind === 'copy' || entry.kind === 'dep')) {
+    // Only copies are placed through temp names here; the dependency clones add the pattern themselves.
+    if (entries.some((entry) => entry.kind === 'copy')) {
         await addExcludePatterns(deps, worktree, [TEMP_PATTERN]);
     }
     for (const entry of entries) {

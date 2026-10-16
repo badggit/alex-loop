@@ -91,6 +91,16 @@ export function realOrUndefined(file: string): string | undefined {
     }
 }
 
+// True when the entry at REL may be written: nothing stands there, or only the tool's own link.
+export function missingOrOwnLink(paths: { main: string; worktree: string }, rel: string): boolean {
+    return lstatOrUndefined(path.join(paths.worktree, rel)) === undefined || isOwnLink(paths, rel);
+}
+
+// Both relative with forward slashes, '' for the root.
+export function isAtOrAbove(dir: string, folder: string): boolean {
+    return dir === '' || folder === dir || folder.startsWith(`${dir}/`);
+}
+
 // A parent reached through a link (for example into the main clone) would put the entry outside root itself.
 export function parentInside(root: string, rel: string): boolean {
     const realRoot = realOrUndefined(root);

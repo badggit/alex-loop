@@ -4,7 +4,8 @@ import type { AssignedProject } from './assign.ts';
 import { installCommand, runInstall, type AttemptResult } from './attempt.ts';
 import { removalCommand, removeNewEntries, removeSafely, shellQuote, untrackedEntries } from './cleanup.ts';
 import { classifyFailure, failureLines, keyErrorLines, lastLifecycleStep, type FailureReport } from './failures.ts';
-import { markOwner, removeMarkedLeftovers } from './leftovers.ts';
+import { makeLink } from './fallback.ts';
+import { markOwner, removeMarkedLeftovers, type ProjectSite } from './leftovers.ts';
 import { checkManagerVersion, executableOf, VERSION_TIMEOUT_MS, type ManagerChoice } from './managers.ts';
 import { maskSecrets } from './mask.ts';
 import { isOwnLink, JS_DEPS, lstatOrUndefined, UV_VENV } from './paths.ts';
@@ -18,8 +19,8 @@ export interface ProjectContext {
     main: string;
     worktree: string;
     privateDir: string | undefined;
-    // Folders of every discovered project; a marked leftover belongs to the deepest one above it.
-    projectDirs: readonly string[];
+    // Every discovered project; a marked leftover belongs to the one markOwner picks.
+    projects: readonly ProjectSite[];
     nowMs: () => number;
     networkTimeoutMs: number;
     progressMs: number;
@@ -51,11 +52,16 @@ function worktreeRel(project: AssignedProject, rel: string): string {
     return project.dir === '' ? rel : `${project.dir}/${rel}`;
 }
 
+// The inverse of worktreeRel for a path inside the project.
+function projectRel(project: AssignedProject, rel: string): string {
+    return project.dir === '' ? rel : rel.slice(project.dir.length + 1);
+}
+
 function defaultFolder(project: AssignedProject): string {
     return worktreeRel(project, project.ecosystem === 'js' ? JS_DEPS : UV_VENV);
 }
 
-export function projectPlace(project: AssignedProject): string {
+export function projectPlace(project: { dir: string }): string {
     return project.dir === '' ? 'the worktree root' : showText(project.dir);
 }
 
@@ -141,7 +147,10 @@ function logWrongVersion(run: Run, expected: string, found: string): void {
 // checked or linked, so a half-installed folder is never kept as if it were complete; false (with a warning naming
 // LABEL) when one cannot be removed.
 export function clearProjectLeftovers(ctx: ProjectContext, project: AssignedProject, label: string): boolean {
-    const removal = removeMarkedLeftovers(ctx, (rel) => markOwner(ctx.projectDirs, rel) === project.dir);
+    const removal = removeMarkedLeftovers(ctx, (rel) => {
+        const owner = markOwner(ctx.projects, rel);
+        return owner?.dir === project.dir && owner.ecosystem === project.ecosystem;
+    });
     if (removal.ok) {
         return true;
     }
@@ -156,8 +165,12 @@ function blockedTargets(run: Run): string[] {
     );
 }
 
+function shownList(rels: readonly string[]): string {
+    return rels.map((rel) => showText(rel)).join(', ');
+}
+
 function warnBlocked(run: Run, blocked: readonly string[]): void {
-    const shown = blocked.map((rel) => showText(rel)).join(', ');
+    const shown = shownList(blocked);
     const tail =
         blocked.length === 1
             ? 'already stands in the worktree and is left as it is'
@@ -166,7 +179,27 @@ function warnBlocked(run: Run, blocked: readonly string[]): void {
     run.ctx.deps.log.warn(`not installed with ${run.label}: ${shown} ${tail} (remove ${pronoun} and rerun to install)`);
 }
 
-function unlinkOwnLinks(run: Run): boolean {
+// Puts back the links this run removed where nothing stands now, so a run that does not install leaves the folder
+// as it found it; no link is made where none stood before. Returns the restored ones.
+function relink(run: Run, unlinked: readonly string[]): string[] {
+    return unlinked.filter((rel) => makeLink(run.ctx, rel) === 'created');
+}
+
+function warnRestored(run: Run, restored: readonly string[]): void {
+    if (restored.length === 0) {
+        return;
+    }
+    const command = ['rm', '--', ...absolutePaths(run, restored).map((file) => shellQuote(file))].join(' ');
+    run.ctx.deps.log.warn(
+        `not installed with ${run.label}: the earlier link was restored for ${shownList(restored)}; ` +
+            `remove it with ${showText(command)} before installing`
+    );
+}
+
+// The tool's own links at the targets go before the install; the ones removed are returned so a run that ends
+// without installing can put them back. Undefined (with a warning) when one cannot be removed.
+function unlinkOwnLinks(run: Run): string[] | undefined {
+    const unlinked: string[] = [];
     for (const rel of run.targets) {
         if (!isOwnLink(run.ctx, rel)) {
             continue;
@@ -174,10 +207,12 @@ function unlinkOwnLinks(run: Run): boolean {
         const result = removeSafely(run.ctx.worktree, rel);
         if (!result.ok) {
             run.ctx.deps.log.warn(`not installed with ${run.label}: ${showText(result.reason)}`);
-            return false;
+            warnRestored(run, relink(run, unlinked));
+            return;
         }
+        unlinked.push(rel);
     }
-    return true;
+    return unlinked;
 }
 
 function saveLog(run: Run, output: string): { logPath: string | undefined; logProblem: string | undefined } {
@@ -236,7 +271,12 @@ async function cleanUp(run: Run, before: ReadonlySet<string>): Promise<void> {
     );
 }
 
-async function reportFailure(run: Run, result: AttemptResult, before: ReadonlySet<string>): Promise<void> {
+// The links this run removed are put back after the cleanup, so the group's missing folders leave them out.
+async function reportFailure(
+    run: Run,
+    result: AttemptResult,
+    state: { before: ReadonlySet<string>; unlinked: readonly string[] }
+): Promise<void> {
     const { env, deps } = run.ctx;
     const output = maskSecrets(result.output, env);
     const lastOutput = maskSecrets(result.lastOutput, env);
@@ -251,7 +291,8 @@ async function reportFailure(run: Run, result: AttemptResult, before: ReadonlySe
         timedOut: result.timedOut,
         lockChanged: result.lockChanged,
     });
-    await cleanUp(run, before);
+    await cleanUp(run, state.before);
+    const restored = relink(run, state.unlinked);
     logGroup(run, {
         failure,
         keyLines: keyErrorLines(lastOutput),
@@ -259,6 +300,7 @@ async function reportFailure(run: Run, result: AttemptResult, before: ReadonlySe
         lifecycleStep: lastLifecycleStep(lastOutput),
         silent: result.lastOutput.trim().length === 0,
     });
+    warnRestored(run, restored);
 }
 
 // Steps 4 to 9 of the install order: folder state, own links, recorded entries, the install itself.
@@ -269,15 +311,22 @@ async function installChecked(run: Run, deadlineMs: number): Promise<ProjectOutc
         warnBlocked(run, blocked);
         return { kind: 'not-installed' };
     }
-    if (!unlinkOwnLinks(run)) {
-        return { kind: 'not-installed' };
-    }
-    const before = await untrackedEntries(deps, projectPath(run));
-    if (before === undefined) {
+    // The listing goes first: when it fails nothing has been unlinked yet.
+    const listed = await untrackedEntries(deps, projectPath(run));
+    if (listed === undefined) {
         deps.log.warn(
             `not installed with ${run.label}: cannot list the untracked entries of ${showText(projectPath(run))}`
         );
         return { kind: 'not-installed' };
+    }
+    const unlinked = unlinkOwnLinks(run);
+    if (unlinked === undefined) {
+        return { kind: 'not-installed' };
+    }
+    // The removed links are gone now, so cleanUp must not take them for entries that stood before the install.
+    const before = new Set(listed);
+    for (const rel of unlinked) {
+        before.delete(projectRel(run.project, rel));
     }
     addMarks(run, run.targets);
     const result = await runInstall(deps, {
@@ -295,7 +344,7 @@ async function installChecked(run: Run, deadlineMs: number): Promise<ProjectOutc
         clearMarks(run, run.targets);
         return { kind: 'installed' };
     }
-    await reportFailure(run, result, before);
+    await reportFailure(run, result, { before, unlinked });
     return { kind: 'failed' };
 }
 
@@ -337,6 +386,12 @@ export async function installProject(
     if (version.kind === 'mismatch') {
         logWrongVersion(run, version.expected, version.found);
         return { kind: 'not-installed' };
+    }
+    if (version.kind === 'differs') {
+        ctx.deps.log.info(
+            `installing with ${run.label} although package.json packageManager names ${version.expected}, ` +
+                `found ${version.found} (npm does not enforce packageManager)`
+        );
     }
     return installChecked(run, deadlineMs);
 }

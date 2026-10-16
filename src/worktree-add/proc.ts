@@ -21,7 +21,7 @@ const GROUP_POLL_MS = 50;
 // Node fires a timer after 1 ms when its delay is above this, so longer timeouts are clamped to it.
 const MAX_TIMER_MS = 2_147_483_647;
 
-function errorCode(error: unknown): string | undefined {
+function codeOrUndefined(error: unknown): string | undefined {
     if (error instanceof Error && 'code' in error && typeof error.code === 'string') {
         return error.code;
     }
@@ -76,7 +76,7 @@ function groupHasMembers(pid: number | undefined): boolean {
         process.kill(-pid, 0);
         return true;
     } catch (error) {
-        return errorCode(error) !== 'ESRCH';
+        return codeOrUndefined(error) !== 'ESRCH';
     }
 }
 
@@ -91,7 +91,7 @@ function trySpawn(request: CommandRequest, env: Env): SpawnAttempt {
         });
         return { child };
     } catch (error) {
-        return { error: errorCode(error) ?? (error instanceof Error ? error.message : 'spawn failed') };
+        return { error: codeOrUndefined(error) ?? (error instanceof Error ? error.message : 'spawn failed') };
     }
 }
 
@@ -192,7 +192,7 @@ function superviseChild(child: SpawnedChild, timeoutMs: number | undefined): Sup
     });
     // ENOENT and other spawn failures emit 'error'; the first settle wins.
     child.on('error', (error) => {
-        finish({ code: SPAWN_FAILED_CODE, ...output, spawnError: errorCode(error) ?? error.message });
+        finish({ code: SPAWN_FAILED_CODE, ...output, spawnError: codeOrUndefined(error) ?? error.message });
     });
     child.on('exit', (code, signal) => {
         exitCode = exitCodeOf(code, signal);
@@ -246,6 +246,6 @@ export function pidAlive(pid: number): boolean {
         process.kill(pid, 0);
         return true;
     } catch (error) {
-        return errorCode(error) === 'EPERM';
+        return codeOrUndefined(error) === 'EPERM';
     }
 }

@@ -176,6 +176,18 @@ await test('copies, links and skips each ignored entry by its class and returns 
     assert.deepEqual(messages(deps.lines), ['info linked .claude, config, docs.local']);
 });
 
+await test('dependency folders alone add no temp pattern, since the sync places no copy', async (t) => {
+    const fixture = makeFixture(t);
+    const { main, worktree, deps } = fixture;
+    const others = ['.env', 'apps/web/.env.local', 'CLAUDE.local.md', 'temp.local', 'docs.local', '.claude', '.venv'];
+    for (const rel of [...others, 'config', 'dist', 'x.tsbuildinfo']) {
+        fs.rmSync(path.join(main, rel), { recursive: true, force: true });
+    }
+    const depRels = await syncIgnored(deps, main, worktree, fakeTransfer());
+    assert.deepEqual(depRels, ['node_modules']);
+    assert.equal(appended(fixture), '');
+});
+
 await test('an ignored folder of any name holding pyvenv.cfg is returned as a dependency folder', async (t) => {
     const fixture = makeFixture(t);
     const { env, main, worktree, deps } = fixture;
@@ -346,7 +358,7 @@ await test('a failing listing warns and creates nothing', async (t) => {
     const transfer = fakeTransfer();
     assert.equal(await syncIgnored(failing, main, worktree, transfer), undefined);
     assert.deepEqual(messages(deps.lines), [
-        `warn cannot list the ignored files of ${main}; nothing synced into the worktree and the dependency fallback is skipped`,
+        `warn cannot list the ignored files of ${main}; nothing synced into the worktree, the dependency fallback is skipped and nested projects are not installed automatically`,
     ]);
     assert.deepEqual(fs.readdirSync(worktree).toSorted(), before);
     assert.deepEqual(transfer.copies, []);

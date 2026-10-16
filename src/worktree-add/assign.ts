@@ -1,5 +1,5 @@
 import type { Ecosystem, Project } from './discover.ts';
-import { JS_DEPS, UV_VENV } from './paths.ts';
+import { isAtOrAbove, JS_DEPS, UV_VENV } from './paths.ts';
 
 export interface AssignedProject extends Project {
     depRels: readonly string[];
@@ -16,10 +16,6 @@ export interface Assignment {
 function splitRel(rel: string): { parent: string; name: string } {
     const slash = rel.lastIndexOf('/');
     return slash === -1 ? { parent: '', name: rel } : { parent: rel.slice(0, slash), name: rel.slice(slash + 1) };
-}
-
-export function isAtOrAbove(dir: string, folder: string): boolean {
-    return dir === '' || folder === dir || folder.startsWith(`${dir}/`);
 }
 
 // The nearest owner is the project with the longest folder among those at or above the given folder.

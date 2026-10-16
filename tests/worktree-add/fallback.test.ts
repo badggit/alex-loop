@@ -101,7 +101,10 @@ await test('node_modules is linked when clones are unavailable', async (t) => {
     for (const rel of rels) {
         assert.equal(linkText(path.join(fixture.worktree, rel)), path.join(fixture.main, rel));
     }
-    assert.deepEqual(messages(fixture.deps.lines), []);
+    assert.deepEqual(messages(fixture.deps.lines), [
+        'info linked node_modules: no copy-on-write',
+        'info linked packages/a/node_modules: no copy-on-write',
+    ]);
 });
 
 await test('.venv is linked even when clones are available', async (t) => {

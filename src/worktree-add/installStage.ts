@@ -4,8 +4,8 @@ import { assignDependencies, type AssignedProject } from './assign.ts';
 import { installCommand } from './attempt.ts';
 import { revertConfigChanges, snapshotSharedConfig, type ConfigSnapshot } from './configGuard.ts';
 import { createDeadline, INSTALL_PHASE_MS, MIN_START_MS } from './deadline.ts';
-import { discoverProjects, isWorkspaceMember, type WorkspaceSpecs } from './discover.ts';
-import { addExcludePatterns, anchoredPattern } from './exclude.ts';
+import { discoverProjects, isWorkspaceMember, type Project, type WorkspaceSpecs } from './discover.ts';
+import { addExcludePatterns, anchoredPattern, TEMP_PATTERN } from './exclude.ts';
 import { failureLines } from './failures.ts';
 import { applyFallback, type FallbackKind, type FallbackResult } from './fallback.ts';
 import {
@@ -20,9 +20,9 @@ import {
     type ProjectContext,
     type ProjectOutcome,
 } from './installProject.ts';
-import { removeMarkedLeftovers } from './leftovers.ts';
+import { removeMarkedLeftovers, type ProjectSite } from './leftovers.ts';
 import { chooseManager, executableOf, type ManagerChoice } from './managers.ts';
-import { JS_DEPS, lstatOrUndefined } from './paths.ts';
+import { isAtOrAbove, JS_DEPS, lstatOrUndefined } from './paths.ts';
 import { privateDir } from './privateArea.ts';
 import { messageOf, showText } from './text.ts';
 import type { Deps, EntryTransfer, Env } from './types.ts';
@@ -126,7 +126,7 @@ function commandOf({ project, choice }: PlannedProject): ShownCommand {
 }
 
 function overlaps(a: string, b: string): boolean {
-    return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+    return isAtOrAbove(a, b) || isAtOrAbove(b, a);
 }
 
 // No install runs, so every marked leftover is from an earlier run and goes before the fallback; a folder whose
@@ -176,9 +176,16 @@ async function sandboxFallback(stage: StageRun, planned: readonly PlannedProject
     ctx.deps.log.info(`installs skipped: the network is disabled in this sandbox${done.join('')}${tail}`);
 }
 
-function orphanReason(rel: string): string {
+// A node_modules under a JS project is an orphan only because no workspace of that project covers its folder.
+function orphanReason(rel: string, projects: readonly Project[]): string {
     if (path.posix.basename(rel) === JS_DEPS) {
-        return `${showText(rel)} belongs to no project with a supported lock file`;
+        const parent = rel.includes('/') ? path.posix.dirname(rel) : '';
+        const owner = projects
+            .filter((project) => project.ecosystem === 'js' && isAtOrAbove(project.dir, parent))
+            .toSorted((a, b) => b.dir.length - a.dir.length)[0];
+        return owner === undefined
+            ? `${showText(rel)} belongs to no project with a supported lock file`
+            : `${showText(rel)} is outside the workspaces of the JS project in ${projectPlace(owner)}`;
     }
     return (
         `${showText(rel)} is a Python environment with no uv.lock next to it, ` +
@@ -193,10 +200,14 @@ function kindText(result: FallbackResult): string {
     return ORPHAN_KIND_TEXT[result.kind];
 }
 
-async function handleOrphans(request: InstallStageRequest, orphans: readonly string[]): Promise<void> {
+async function handleOrphans(
+    request: InstallStageRequest,
+    orphans: readonly string[],
+    projects: readonly Project[]
+): Promise<void> {
     const results = await applyFallback(request.deps, paths(request), request.transfer, orphans);
     for (const result of results) {
-        request.deps.log.warn(`not installed: ${orphanReason(result.rel)}; ${kindText(result)}`);
+        request.deps.log.warn(`not installed: ${orphanReason(result.rel, projects)}; ${kindText(result)}`);
     }
 }
 
@@ -330,14 +341,18 @@ async function excludeNewTargets(request: InstallStageRequest, planned: readonly
     );
 }
 
-function stageContext(request: InstallStageRequest, dir: string | undefined, projectDirs: string[]): ProjectContext {
+function stageContext(
+    request: InstallStageRequest,
+    dir: string | undefined,
+    projects: readonly ProjectSite[]
+): ProjectContext {
     return {
         deps: request.deps,
         env: request.env,
         main: request.main,
         worktree: request.worktree,
         privateDir: dir,
-        projectDirs,
+        projects,
         nowMs: request.nowMs,
         networkTimeoutMs: request.timing.networkTimeoutMs,
         progressMs: request.timing.progressMs,
@@ -348,11 +363,9 @@ function stageContext(request: InstallStageRequest, dir: string | undefined, pro
 // cloned or linked from the main clone. The exclude patterns go first so nothing made later shows in git status.
 export async function runInstallStage(request: InstallStageRequest): Promise<void> {
     const { deps, worktree, depRels } = request;
-    await addExcludePatterns(
-        deps,
-        worktree,
-        depRels.map((rel) => anchoredPattern(rel))
-    );
+    // A dependency clone is placed through a temp name, so the temp pattern comes with the folders.
+    const temps = depRels.length > 0 ? [TEMP_PATTERN] : [];
+    await addExcludePatterns(deps, worktree, [...temps, ...depRels.map((rel) => anchoredPattern(rel))]);
     const dir = await privateDir(deps, worktree);
     if (request.noInstall) {
         await skipAll(request, dir);
@@ -373,16 +386,12 @@ export async function runInstallStage(request: InstallStageRequest): Promise<voi
     }));
     const stage: StageRun = {
         request,
-        ctx: stageContext(
-            request,
-            dir,
-            found.map((project) => project.dir)
-        ),
+        ctx: stageContext(request, dir, found),
     };
     reportManual(request, planned);
     const autoProjects = planned.filter((plan) => plan.project.auto);
     // Cloning or linking needs no network, so the orphans and the extra environments get it in the sandbox too.
-    await handleOrphans(request, assignment.orphans);
+    await handleOrphans(request, assignment.orphans, found);
     await handleLinkOnly(request, autoProjects);
     if (request.env[SANDBOX_NETWORK_VARIABLE] === '1') {
         await sandboxFallback(stage, autoProjects);

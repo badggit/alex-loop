@@ -40,18 +40,69 @@ function patternSegments(pattern: string): string[] {
     return text.split('/').filter((segment) => segment.length > 0 && segment !== '.');
 }
 
-function segmentMatches(pattern: string, segment: string): boolean {
+function literalSource(char: string): string {
+    return /[$()*+.?[\\\]^{|}]/u.test(char) ? `\\${char}` : char;
+}
+
+// A leading ']' is a member, as in POSIX classes; -1 means there is no closing bracket.
+function classEnd(pattern: string, open: number): number {
+    let start = open + 1;
+    if (pattern[start] === '!' || pattern[start] === '^') {
+        start += 1;
+    }
+    return pattern.indexOf(']', start + 1);
+}
+
+function classSource(body: string): string {
+    const negated = body.startsWith('!') || body.startsWith('^');
+    const members = (negated ? body.slice(1) : body).replaceAll(/[[\\\]^]/gu, String.raw`\$&`);
+    return negated ? `[^/${members}]` : `[${members}]`;
+}
+
+// Only flat sets with a comma alternate; a nested or comma-free brace stays literal.
+function braceEnd(pattern: string, open: number): number {
+    const close = pattern.indexOf('}', open + 1);
+    const body = pattern.slice(open + 1, close);
+    return close !== -1 && body.includes(',') && !body.includes('{') ? close : -1;
+}
+
+function globSource(pattern: string): string {
     let source = '';
-    for (const char of pattern) {
+    let index = 0;
+    while (index < pattern.length) {
+        const char = pattern[index] ?? '';
+        const classClose = char === '[' ? classEnd(pattern, index) : -1;
+        const braceClose = char === '{' ? braceEnd(pattern, index) : -1;
+        if (classClose >= 0) {
+            source += classSource(pattern.slice(index + 1, classClose));
+            index = classClose + 1;
+            continue;
+        }
+        if (braceClose >= 0) {
+            const options = pattern.slice(index + 1, braceClose).split(',');
+            source += `(?:${options.map((option) => globSource(option)).join('|')})`;
+            index = braceClose + 1;
+            continue;
+        }
         if (char === '*') {
             source += '[^/]*';
         } else if (char === '?') {
             source += '[^/]';
         } else {
-            source += /[$()+.[\\\]^{|}]/u.test(char) ? `\\${char}` : char;
+            source += literalSource(char);
         }
+        index += 1;
     }
-    return new RegExp(`^${source}$`, 'u').test(segment);
+    return source;
+}
+
+function segmentMatches(pattern: string, segment: string): boolean {
+    try {
+        return new RegExp(`^${globSource(pattern)}$`, 'u').test(segment);
+    } catch {
+        // A reversed range such as [c-a] is not a valid class, so the pattern matches nothing.
+        return false;
+    }
 }
 
 function segmentsMatch(pattern: readonly string[], pi: number, rel: readonly string[], ri: number): boolean {

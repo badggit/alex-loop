@@ -94,7 +94,7 @@ async function syncQuietly(
     } catch (error) {
         deps.log.warn(
             `cannot sync ignored paths into the worktree: ${messageOf(error)}; ` +
-                'the dependency fallback from the main clone is skipped'
+                'the dependency fallback from the main clone is skipped and nested projects are not installed automatically'
         );
         return undefined;
     }

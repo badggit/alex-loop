@@ -209,6 +209,9 @@ function parseArgs(argv, home) {
     if (value === void 0) {
       return usage(`missing value for ${arg}`);
     }
+    if (value.startsWith("--")) {
+      return usage(`missing value for ${arg}: got the option ${showText(value)}`);
+    }
     values[arg] = value;
     index += 1;
   }
@@ -327,6 +330,12 @@ function realOrUndefined(file) {
   } catch {
     return;
   }
+}
+function missingOrOwnLink(paths2, rel) {
+  return lstatOrUndefined(path.join(paths2.worktree, rel)) === void 0 || isOwnLink(paths2, rel);
+}
+function isAtOrAbove(dir, folder) {
+  return dir === "" || folder === dir || folder.startsWith(`${dir}/`);
 }
 function parentInside(root, rel) {
   const realRoot = realOrUndefined(root);
@@ -1175,9 +1184,6 @@ function splitRel(rel) {
   const slash = rel.lastIndexOf("/");
   return slash === -1 ? { parent: "", name: rel } : { parent: rel.slice(0, slash), name: rel.slice(slash + 1) };
 }
-function isAtOrAbove(dir, folder) {
-  return dir === "" || folder === dir || folder.startsWith(`${dir}/`);
-}
 function nearestOwner(projects, ecosystem, folder) {
   let best;
   for (const [index, project] of projects.entries()) {
@@ -1226,8 +1232,471 @@ var init_assign = __esm({
   }
 });
 
-// src/worktree-add/attempt.ts
+// src/worktree-add/proc.ts
+import { spawn } from "node:child_process";
+import { constants as osConstants } from "node:os";
+function codeOrUndefined(error) {
+  if (error instanceof Error && "code" in error && typeof error.code === "string") {
+    return error.code;
+  }
+  return;
+}
+function childEnv(runnerEnv, requestEnv) {
+  const result = /* @__PURE__ */ new Map();
+  for (const [name, value] of Object.entries(runnerEnv)) {
+    if (value !== void 0) {
+      result.set(name, value);
+    }
+  }
+  for (const [name, value] of Object.entries(requestEnv ?? {})) {
+    if (value === void 0) {
+      result.delete(name);
+    } else {
+      result.set(name, value);
+    }
+  }
+  return Object.fromEntries(result);
+}
+function exitCodeOf(code, signal) {
+  if (code !== null) {
+    return code;
+  }
+  if (signal !== null) {
+    return 128 + osConstants.signals[signal];
+  }
+  return 1;
+}
+function signalGroup(pid, signal) {
+  if (pid === void 0) {
+    return;
+  }
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    return;
+  }
+}
+function groupHasMembers(pid) {
+  if (pid === void 0) {
+    return false;
+  }
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    return codeOrUndefined(error) !== "ESRCH";
+  }
+}
+function trySpawn(request, env) {
+  try {
+    const child = spawn(request.file, [...request.args], {
+      cwd: request.cwd,
+      env: childEnv(env, request.env),
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true
+    });
+    return { child };
+  } catch (error) {
+    return { error: codeOrUndefined(error) ?? (error instanceof Error ? error.message : "spawn failed") };
+  }
+}
+function ignoreResult() {
+  return;
+}
+function superviseChild(child, timeoutMs) {
+  let resolveResult = ignoreResult;
+  const result = new Promise((resolve) => {
+    resolveResult = resolve;
+  });
+  const pid = child.pid;
+  const output = { stdout: "", stderr: "" };
+  const timers = [];
+  let settled = false;
+  let cancelled = false;
+  let timedOut = false;
+  let killStepDone = false;
+  let exitCode;
+  let closeCode;
+  const finish = (value) => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    for (const timer of timers) {
+      clearTimeout(timer);
+    }
+    resolveResult(timedOut ? { ...value, timedOut: true } : value);
+  };
+  const finishWhenQuiet = () => {
+    if (closeCode !== void 0 && (killStepDone || !groupHasMembers(pid))) {
+      finish({ code: closeCode, ...output });
+    }
+  };
+  const poll = () => {
+    finishWhenQuiet();
+    if (!settled) {
+      timers.push(setTimeout(poll, GROUP_POLL_MS));
+    }
+  };
+  const cancel = () => {
+    if (cancelled || settled) {
+      return;
+    }
+    cancelled = true;
+    signalGroup(pid, "SIGTERM");
+    timers.push(
+      setTimeout(() => {
+        if (groupHasMembers(pid)) {
+          signalGroup(pid, "SIGKILL");
+        }
+        killStepDone = true;
+        finishWhenQuiet();
+      }, KILL_GRACE_MS),
+      setTimeout(() => {
+        child.stdout.destroy();
+        child.stderr.destroy();
+        finish({ code: closeCode ?? exitCode ?? KILLED_CODE, ...output });
+      }, GIVE_UP_MS)
+    );
+    poll();
+  };
+  if (timeoutMs !== void 0) {
+    timers.push(
+      setTimeout(
+        () => {
+          if (cancelled || settled) {
+            return;
+          }
+          if (exitCode === void 0) {
+            timedOut = true;
+          }
+          cancel();
+        },
+        Math.min(timeoutMs, MAX_TIMER_MS)
+      )
+    );
+  }
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    output.stdout += chunk;
+  });
+  child.stderr.on("data", (chunk) => {
+    output.stderr += chunk;
+  });
+  child.on("error", (error) => {
+    finish({ code: SPAWN_FAILED_CODE, ...output, spawnError: codeOrUndefined(error) ?? error.message });
+  });
+  child.on("exit", (code, signal) => {
+    exitCode = exitCodeOf(code, signal);
+  });
+  child.on("close", (code, signal) => {
+    closeCode = exitCodeOf(code, signal);
+    if (cancelled) {
+      finishWhenQuiet();
+    } else {
+      finish({ code: closeCode, ...output });
+    }
+  });
+  return { cancel, result };
+}
+function runCommand(request, env, running) {
+  const attempt = trySpawn(request, env);
+  if ("error" in attempt) {
+    return Promise.resolve({ code: SPAWN_FAILED_CODE, stdout: "", stderr: "", spawnError: attempt.error });
+  }
+  const supervised = superviseChild(attempt.child, request.timeoutMs);
+  running.add(supervised);
+  return supervised.result.finally(() => {
+    running.delete(supervised);
+  });
+}
+async function terminateRunning(running) {
+  const pending = [...running];
+  for (const supervised of pending) {
+    supervised.cancel();
+  }
+  await Promise.all(pending.map((supervised) => supervised.result));
+}
+function createProcessRunner(env) {
+  const running = /* @__PURE__ */ new Set();
+  return {
+    run: (request) => runCommand(request, env, running),
+    terminateAll: () => terminateRunning(running)
+  };
+}
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 1) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return codeOrUndefined(error) === "EPERM";
+  }
+}
+var SPAWN_FAILED_CODE, KILLED_CODE, KILL_GRACE_MS, GIVE_UP_MS, GROUP_POLL_MS, MAX_TIMER_MS;
+var init_proc = __esm({
+  "src/worktree-add/proc.ts"() {
+    "use strict";
+    SPAWN_FAILED_CODE = 127;
+    KILLED_CODE = 137;
+    KILL_GRACE_MS = 5e3;
+    GIVE_UP_MS = 1e4;
+    GROUP_POLL_MS = 50;
+    MAX_TIMER_MS = 2147483647;
+  }
+});
+
+// src/worktree-add/managers.ts
 import fs8 from "node:fs";
+import path7 from "node:path";
+function executableOf(manager) {
+  return EXECUTABLES[manager];
+}
+function isJsFamily(name) {
+  return Object.hasOwn(FAMILY_LOCKS, name);
+}
+function readHead(file) {
+  let fd;
+  try {
+    fd = fs8.openSync(file, "r");
+    const buffer = Buffer.alloc(HEAD_BYTES);
+    const size = fs8.readSync(fd, buffer, 0, HEAD_BYTES, 0);
+    return buffer.subarray(0, size).toString("utf8");
+  } catch {
+    return;
+  } finally {
+    if (fd !== void 0) {
+      fs8.closeSync(fd);
+    }
+  }
+}
+function readPackageManagerField(projectDir) {
+  let parsed;
+  try {
+    parsed = JSON.parse(fs8.readFileSync(path7.join(projectDir, "package.json"), "utf8"));
+  } catch {
+    return { kind: "absent" };
+  }
+  if (typeof parsed !== "object" || !parsed || !("packageManager" in parsed)) {
+    return { kind: "absent" };
+  }
+  const value = parsed.packageManager;
+  if (typeof value !== "string") {
+    return { kind: "absent" };
+  }
+  const spec = value.trim();
+  const match = /^([a-z]+)@(\d+)\.\d+\.\d+(?:[-+].*)?$/.exec(spec);
+  const name = match?.[1];
+  const major = match?.[2];
+  if (name === void 0 || major === void 0 || !isJsFamily(name)) {
+    return { kind: "invalid", text: value };
+  }
+  return { kind: "pinned", pin: { family: name, major: Number(major), spec } };
+}
+function exactMajor(name, major) {
+  return { text: `${name} ${major}`, accepts: (found) => found === major };
+}
+function yarnKind(projectDir) {
+  const head = readHead(path7.join(projectDir, "yarn.lock")) ?? "";
+  if (/^__metadata:/m.test(head)) {
+    return "yarn-berry";
+  }
+  if (/^# yarn lockfile v1\s*$/m.test(head)) {
+    return "yarn-classic";
+  }
+  return;
+}
+function yarnPathMajor(projectDir) {
+  const rc = readHead(path7.join(projectDir, ".yarnrc.yml")) ?? "";
+  const match = /^yarnPath:\s*["']?([^"'\n#]*?)["']?\s*(?:#.*)?$/m.exec(rc);
+  const release = /(?:^|\/)yarn-(\d+)\.\d+\.\d+\.cjs$/.exec(match?.[1] ?? "");
+  return release?.[1] === void 0 ? void 0 : Number(release[1]);
+}
+function berryExpectation(projectDir) {
+  const pinned = yarnPathMajor(projectDir);
+  if (pinned !== void 0) {
+    return exactMajor("yarn", pinned);
+  }
+  return { text: "yarn 2 or newer", accepts: (major) => major >= 2 };
+}
+function pnpmExpectation(projectDir) {
+  const head = readHead(path7.join(projectDir, "pnpm-lock.yaml")) ?? "";
+  const match = /^lockfileVersion:\s*["']?(\d+)(?:\.\d+)?["']?\s*$/m.exec(head);
+  const majors = match?.[1] === void 0 ? void 0 : PNPM_LOCK_MAJORS.get(Number(match[1]));
+  if (majors === void 0) {
+    return;
+  }
+  return { text: `pnpm ${majors.join(" or ")}`, accepts: (major) => majors.includes(major) };
+}
+function fromLock(projectDir, family) {
+  switch (family) {
+    case "npm":
+    case "bun": {
+      return { kind: "manager", manager: family, expected: void 0 };
+    }
+    case "pnpm": {
+      return { kind: "manager", manager: "pnpm", expected: pnpmExpectation(projectDir) };
+    }
+    case "yarn": {
+      const kind = yarnKind(projectDir);
+      if (kind === void 0) {
+        return {
+          kind: "conflict",
+          reason: 'yarn.lock has neither a "# yarn lockfile v1" header nor a __metadata: section'
+        };
+      }
+      const expected = kind === "yarn-berry" ? berryExpectation(projectDir) : exactMajor("yarn", 1);
+      return { kind: "manager", manager: kind, expected };
+    }
+  }
+}
+function pinLockMismatch(projectDir, pin) {
+  const shownPin = pin.spec.replace(/\+.*$/, "");
+  if (pin.family === "yarn") {
+    const kind = yarnKind(projectDir);
+    if (kind === "yarn-berry" && pin.major === 1) {
+      return `packageManager names ${shownPin} but yarn.lock is a yarn 2 or newer (berry) lock file`;
+    }
+    if (kind === "yarn-classic" && pin.major !== 1) {
+      return `packageManager names ${shownPin} but yarn.lock is a yarn 1 lock file`;
+    }
+    return;
+  }
+  if (pin.family === "pnpm") {
+    const allowed = pnpmExpectation(projectDir);
+    if (allowed !== void 0 && !allowed.accepts(pin.major)) {
+      return `packageManager names ${shownPin} but pnpm-lock.yaml is written by ${allowed.text}`;
+    }
+  }
+  return;
+}
+function fromPin(projectDir, pin, lockNames) {
+  const own = FAMILY_LOCKS[pin.family];
+  if (!lockNames.some((name) => own.includes(name))) {
+    return {
+      kind: "conflict",
+      reason: `packageManager names ${pin.family} ${pin.major} but ${own.join(" / ")} is missing (found ${lockNames.join(", ")})`
+    };
+  }
+  const mismatch = pinLockMismatch(projectDir, pin);
+  if (mismatch !== void 0) {
+    return { kind: "conflict", reason: mismatch };
+  }
+  const { family } = pin;
+  let manager;
+  if (family === "yarn") {
+    manager = pin.major === 1 ? "yarn-classic" : "yarn-berry";
+  } else {
+    manager = family;
+  }
+  const expected = exactMajor(pin.family, pin.major);
+  return { kind: "manager", manager, expected: family === "npm" ? { ...expected, advisory: true } : expected };
+}
+function chooseManager(projectDir, ecosystem, lockNames) {
+  if (ecosystem === "uv") {
+    return { kind: "manager", manager: "uv", expected: void 0 };
+  }
+  const field = readPackageManagerField(projectDir);
+  if (field.kind === "invalid") {
+    return {
+      kind: "conflict",
+      reason: `package.json packageManager "${field.text}" is not a supported NAME@X.Y.Z`
+    };
+  }
+  if (field.kind === "pinned") {
+    return fromPin(projectDir, field.pin, lockNames);
+  }
+  const jsLocks = lockNames.filter((name) => LOCK_FAMILIES.has(name));
+  const families = new Set(jsLocks.map((name) => LOCK_FAMILIES.get(name)));
+  const [family, ...others] = families;
+  if (family === void 0) {
+    return { kind: "conflict", reason: "no JS lock file was found" };
+  }
+  if (others.length > 0) {
+    return {
+      kind: "conflict",
+      reason: `several package managers' lock files (${jsLocks.join(", ")}) and no packageManager in package.json`
+    };
+  }
+  return fromLock(projectDir, family);
+}
+function failureReason(result, timeoutMs) {
+  if (result.timedOut === true) {
+    return `--version timed out after ${timeoutMs} ms`;
+  }
+  if (result.spawnError !== void 0) {
+    return `could not start: ${result.spawnError}`;
+  }
+  const detail = (result.stderr.trim() || result.stdout.trim()).split("\n", 1)[0] ?? "";
+  return `--version exited with code ${result.code}${detail ? `: ${detail}` : ""}`;
+}
+async function checkManagerVersion(deps, manager, expected, projectDir, timeoutMs = VERSION_TIMEOUT_MS) {
+  const result = await deps.runner.run({
+    file: executableOf(manager),
+    args: ["--version"],
+    cwd: projectDir,
+    timeoutMs
+  });
+  if (result.code === SPAWN_FAILED_CODE && result.spawnError === "ENOENT") {
+    return { kind: "missing" };
+  }
+  const expectedText = expected?.text ?? `${executableOf(manager)} (any version)`;
+  if (result.code !== 0 || result.timedOut === true) {
+    return { kind: "mismatch", expected: expectedText, found: `unknown (${failureReason(result, timeoutMs)})` };
+  }
+  const match = /(\d+)\.\d+(?:\.\d+)?/.exec(result.stdout);
+  const version = match?.[0];
+  const major = match?.[1];
+  if (version === void 0 || major === void 0) {
+    return { kind: "mismatch", expected: expectedText, found: "unknown (no version in --version output)" };
+  }
+  if (expected !== void 0 && !expected.accepts(Number(major))) {
+    return { kind: expected.advisory === true ? "differs" : "mismatch", expected: expected.text, found: version };
+  }
+  return { kind: "ok", version };
+}
+var VERSION_TIMEOUT_MS, HEAD_BYTES, LOCK_FAMILIES, FAMILY_LOCKS, EXECUTABLES, PNPM_LOCK_MAJORS;
+var init_managers = __esm({
+  "src/worktree-add/managers.ts"() {
+    "use strict";
+    init_proc();
+    VERSION_TIMEOUT_MS = 2e4;
+    HEAD_BYTES = 64 * 1024;
+    LOCK_FAMILIES = /* @__PURE__ */ new Map([
+      ["package-lock.json", "npm"],
+      ["npm-shrinkwrap.json", "npm"],
+      ["pnpm-lock.yaml", "pnpm"],
+      ["yarn.lock", "yarn"],
+      ["bun.lock", "bun"],
+      ["bun.lockb", "bun"]
+    ]);
+    FAMILY_LOCKS = {
+      npm: ["package-lock.json", "npm-shrinkwrap.json"],
+      pnpm: ["pnpm-lock.yaml"],
+      yarn: ["yarn.lock"],
+      bun: ["bun.lock", "bun.lockb"]
+    };
+    EXECUTABLES = {
+      npm: "npm",
+      pnpm: "pnpm",
+      "yarn-classic": "yarn",
+      "yarn-berry": "yarn",
+      bun: "bun",
+      uv: "uv"
+    };
+    PNPM_LOCK_MAJORS = /* @__PURE__ */ new Map([
+      [9, [9, 10]],
+      [6, [8]],
+      [5, [6, 7]]
+    ]);
+  }
+});
+
+// src/worktree-add/attempt.ts
+import fs9 from "node:fs";
 function uvEnv(timeoutMs) {
   const seconds2 = Math.max(1, Math.ceil(timeoutMs / 1e3));
   return {
@@ -1244,7 +1713,7 @@ function combined(result) {
 }
 function readLock(file) {
   try {
-    return { kind: "bytes", bytes: fs8.readFileSync(file) };
+    return { kind: "bytes", bytes: fs9.readFileSync(file) };
   } catch (error) {
     return errorCode(error) === "ENOENT" ? { kind: "absent" } : { kind: "unreadable", reason: messageOf(error) };
   }
@@ -1272,9 +1741,9 @@ function restoreLocks(snapshot) {
     changed = true;
     try {
       if (before.kind === "absent") {
-        fs8.rmSync(file, { force: true });
+        fs9.rmSync(file, { force: true });
       } else {
-        fs8.writeFileSync(file, before.bytes);
+        fs9.writeFileSync(file, before.bytes);
       }
     } catch (error) {
       problems.push(`${file}: ${messageOf(error)}`);
@@ -1295,14 +1764,13 @@ function showsOfflineMiss(commands, result) {
   return commands.offlineMissSignals.some((signal) => text.includes(signal));
 }
 async function runWithProgress(deps, request, attempt, firstStartMs) {
-  const commands = COMMANDS[request.manager];
   const timer = setInterval(() => {
     const seconds2 = Math.floor((request.nowMs() - firstStartMs) / 1e3);
     deps.log.info(`still installing with ${request.label} (${seconds2} s)`);
   }, request.progressMs);
   try {
     return await deps.runner.run({
-      file: commands.file,
+      file: executableOf(request.manager),
       args: attempt.args,
       cwd: request.projectDir,
       env: attempt.env,
@@ -1362,6 +1830,7 @@ var NPM_STYLE_FETCH_LIMITS, NO_ENV, UV_OWN_ENV, COMMANDS;
 var init_attempt = __esm({
   "src/worktree-add/attempt.ts"() {
     "use strict";
+    init_managers();
     init_paths();
     init_text();
     NPM_STYLE_FETCH_LIMITS = (timeoutMs) => [
@@ -1374,7 +1843,6 @@ var init_attempt = __esm({
     UV_OWN_ENV = { UV_PROJECT_ENVIRONMENT: void 0, VIRTUAL_ENV: void 0 };
     COMMANDS = {
       npm: {
-        file: "npm",
         shown: "npm ci",
         offline: ["ci", "--offline"],
         offlineMissSignals: ["ENOTCACHED"],
@@ -1383,7 +1851,6 @@ var init_attempt = __esm({
         onlineEnv: NO_ENV
       },
       pnpm: {
-        file: "pnpm",
         shown: "pnpm install --frozen-lockfile",
         offline: ["install", "--frozen-lockfile", "--offline"],
         offlineMissSignals: ["ERR_PNPM_NO_OFFLINE_TARBALL", "ERR_PNPM_NO_OFFLINE_META"],
@@ -1392,7 +1859,6 @@ var init_attempt = __esm({
         onlineEnv: NO_ENV
       },
       "yarn-classic": {
-        file: "yarn",
         shown: "yarn install --frozen-lockfile",
         offline: ["install", "--frozen-lockfile", "--offline"],
         offlineMissSignals: ["Couldn't find any versions", "Can't make a request in offline mode"],
@@ -1401,7 +1867,6 @@ var init_attempt = __esm({
         onlineEnv: NO_ENV
       },
       "yarn-berry": {
-        file: "yarn",
         shown: "yarn install --immutable",
         offline: void 0,
         offlineMissSignals: [],
@@ -1410,7 +1875,6 @@ var init_attempt = __esm({
         onlineEnv: (timeoutMs) => ({ YARN_HTTP_TIMEOUT: String(timeoutMs), YARN_HTTP_RETRY: "1" })
       },
       bun: {
-        file: "bun",
         shown: "bun install --frozen-lockfile",
         offline: void 0,
         offlineMissSignals: [],
@@ -1419,7 +1883,6 @@ var init_attempt = __esm({
         onlineEnv: NO_ENV
       },
       uv: {
-        file: "uv",
         shown: "uv sync --frozen",
         offline: ["sync", "--frozen", "--offline"],
         // The last one is uv's hint when the project's Python must be downloaded, which offline mode forbids.
@@ -1465,7 +1928,7 @@ var init_mask = __esm({
 });
 
 // src/worktree-add/configGuard.ts
-import path7 from "node:path";
+import path8 from "node:path";
 function configGit(deps, file, args) {
   return deps.runner.run({ file: "git", args: ["config", "--file", file, ...args] });
 }
@@ -1520,7 +1983,7 @@ async function snapshotSharedConfig(deps, worktree) {
   if (result.code !== 0 || printed2.length === 0) {
     return;
   }
-  const file = path7.join(path7.resolve(worktree, printed2), "config");
+  const file = path8.join(path8.resolve(worktree, printed2), "config");
   const read = await readConfig(deps, file);
   return read.ok ? { file, entries: read.entries } : void 0;
 }
@@ -1603,8 +2066,8 @@ var init_deadline = __esm({
 });
 
 // src/worktree-add/discover.ts
-import fs9 from "node:fs";
-import path8 from "node:path";
+import fs10 from "node:fs";
+import path9 from "node:path";
 function patternSegments(pattern) {
   let text = pattern.trim();
   while (text.startsWith("./")) {
@@ -1612,18 +2075,61 @@ function patternSegments(pattern) {
   }
   return text.split("/").filter((segment) => segment.length > 0 && segment !== ".");
 }
-function segmentMatches(pattern, segment) {
+function literalSource(char) {
+  return /[$()*+.?[\\\]^{|}]/u.test(char) ? `\\${char}` : char;
+}
+function classEnd(pattern, open) {
+  let start = open + 1;
+  if (pattern[start] === "!" || pattern[start] === "^") {
+    start += 1;
+  }
+  return pattern.indexOf("]", start + 1);
+}
+function classSource(body) {
+  const negated = body.startsWith("!") || body.startsWith("^");
+  const members = (negated ? body.slice(1) : body).replaceAll(/[[\\\]^]/gu, String.raw`\$&`);
+  return negated ? `[^/${members}]` : `[${members}]`;
+}
+function braceEnd(pattern, open) {
+  const close = pattern.indexOf("}", open + 1);
+  const body = pattern.slice(open + 1, close);
+  return close !== -1 && body.includes(",") && !body.includes("{") ? close : -1;
+}
+function globSource(pattern) {
   let source = "";
-  for (const char of pattern) {
+  let index = 0;
+  while (index < pattern.length) {
+    const char = pattern[index] ?? "";
+    const classClose = char === "[" ? classEnd(pattern, index) : -1;
+    const braceClose = char === "{" ? braceEnd(pattern, index) : -1;
+    if (classClose >= 0) {
+      source += classSource(pattern.slice(index + 1, classClose));
+      index = classClose + 1;
+      continue;
+    }
+    if (braceClose >= 0) {
+      const options = pattern.slice(index + 1, braceClose).split(",");
+      source += `(?:${options.map((option) => globSource(option)).join("|")})`;
+      index = braceClose + 1;
+      continue;
+    }
     if (char === "*") {
       source += "[^/]*";
     } else if (char === "?") {
       source += "[^/]";
     } else {
-      source += /[$()+.[\\\]^{|}]/u.test(char) ? `\\${char}` : char;
+      source += literalSource(char);
     }
+    index += 1;
   }
-  return new RegExp(`^${source}$`, "u").test(segment);
+  return source;
+}
+function segmentMatches(pattern, segment) {
+  try {
+    return new RegExp(`^${globSource(pattern)}$`, "u").test(segment);
+  } catch {
+    return false;
+  }
 }
 function segmentsMatch(pattern, pi, rel, ri) {
   const head = pattern[pi];
@@ -1644,7 +2150,7 @@ function matchesWorkspaceGlob(pattern, rel) {
 }
 function readText(file) {
   try {
-    return fs9.readFileSync(file, "utf8");
+    return fs10.readFileSync(file, "utf8");
   } catch {
     return void 0;
   }
@@ -1762,9 +2268,9 @@ function packageJsonWorkspaces(file) {
   return stringsOf(workspaces) ?? (isRecord(workspaces) ? stringsOf(workspaces.packages) ?? [] : []);
 }
 function jsWorkspace(dir) {
-  const yaml = readText(path8.join(dir, "pnpm-workspace.yaml"));
+  const yaml = readText(path9.join(dir, "pnpm-workspace.yaml"));
   const patterns = [
-    ...packageJsonWorkspaces(path8.join(dir, "package.json")),
+    ...packageJsonWorkspaces(path9.join(dir, "package.json")),
     ...(yaml === void 0 ? void 0 : yamlPackages(yaml)) ?? []
   ];
   const include = patterns.filter((pattern) => !pattern.startsWith("!"));
@@ -1772,7 +2278,7 @@ function jsWorkspace(dir) {
   return include.length > 0 ? { include, exclude } : void 0;
 }
 function uvWorkspace(dir) {
-  const text = readText(path8.join(dir, "pyproject.toml"));
+  const text = readText(path9.join(dir, "pyproject.toml"));
   if (text === void 0) {
     return void 0;
   }
@@ -1788,7 +2294,7 @@ function workspaceOf(worktree, project, specs) {
   if (specs.has(key)) {
     return specs.get(key);
   }
-  const dir = path8.join(worktree, project.dir);
+  const dir = path9.join(worktree, project.dir);
   const spec = project.ecosystem === "js" ? jsWorkspace(dir) : uvWorkspace(dir);
   specs.set(key, spec);
   return spec;
@@ -1805,15 +2311,15 @@ function isMember(spec, rel) {
 function groupLocks(files) {
   const groups = /* @__PURE__ */ new Map();
   for (const file of files) {
-    const ecosystem = LOCK_ECOSYSTEMS.get(path8.posix.basename(file));
+    const ecosystem = LOCK_ECOSYSTEMS.get(path9.posix.basename(file));
     if (ecosystem === void 0 || file.split("/").includes("node_modules")) {
       continue;
     }
-    const parent = path8.posix.dirname(file);
+    const parent = path9.posix.dirname(file);
     const dir = parent === "." ? "" : parent;
     const key = `${ecosystem}\0${dir}`;
     const group = groups.get(key) ?? { dir, ecosystem, lockNames: [] };
-    group.lockNames.push(path8.posix.basename(file));
+    group.lockNames.push(path9.posix.basename(file));
     groups.set(key, group);
   }
   return [...groups.values()].map((group) => ({ ...group, lockNames: group.lockNames.toSorted() }));
@@ -1868,15 +2374,15 @@ var init_discover = __esm({
 });
 
 // src/worktree-add/exclude.ts
-import fs10 from "node:fs";
-import path9 from "node:path";
+import fs11 from "node:fs";
+import path10 from "node:path";
 function anchoredPattern(rel) {
   const escaped = rel.replaceAll(GLOB_CHARACTERS, String.raw`\$&`);
   return `/${escaped.endsWith(" ") ? `${escaped.slice(0, -1)}${String.raw`\ `}` : escaped}`;
 }
 function readExisting(file) {
   try {
-    return { ok: true, text: fs10.readFileSync(file, "utf8") };
+    return { ok: true, text: fs11.readFileSync(file, "utf8") };
   } catch (error) {
     return errorCode(error) === "ENOENT" ? { ok: true, text: "" } : { ok: false };
   }
@@ -1890,7 +2396,7 @@ async function excludeFilePath(deps, worktree) {
   if (resolved.code !== 0 || line.length === 0) {
     return;
   }
-  return path9.resolve(worktree, line);
+  return path10.resolve(worktree, line);
 }
 function appendText(text, present, missing) {
   const header = present.has(EXCLUDE_HEADER) ? [] : [EXCLUDE_HEADER];
@@ -1918,8 +2424,8 @@ async function addExcludePatterns(deps, worktree, patterns) {
     return;
   }
   try {
-    fs10.mkdirSync(path9.dirname(file), { recursive: true });
-    fs10.appendFileSync(file, appendText(existing.text, present, missing));
+    fs11.mkdirSync(path10.dirname(file), { recursive: true });
+    fs11.appendFileSync(file, appendText(existing.text, present, missing));
   } catch {
     deps.log.warn(`cannot update ${showText(file)}${FAILURE_TAIL}`);
   }
@@ -2161,15 +2667,15 @@ var init_failures = __esm({
 });
 
 // src/worktree-add/fallback.ts
-import fs11 from "node:fs";
-import path10 from "node:path";
+import fs12 from "node:fs";
+import path11 from "node:path";
 function makeLink(run, rel) {
-  const dest = path10.join(run.worktree, rel);
+  const dest = path11.join(run.worktree, rel);
   if (lstatOrUndefined(dest) !== void 0) {
     return "exists";
   }
   try {
-    fs11.symlinkSync(path10.join(run.main, rel), dest);
+    fs12.symlinkSync(path11.join(run.main, rel), dest);
     return "created";
   } catch (error) {
     const code = errorCode(error);
@@ -2193,23 +2699,23 @@ async function cloneOrLink(run, rel) {
     return "cloned";
   }
   const kind = ensureLink(run, rel);
+  if (outcome.kind === "unavailable" && kind === "linked") {
+    run.deps.log.info(`linked ${showText(rel)}: ${showText(outcome.reason)}`);
+  }
   if (outcome.kind === "failed") {
     const fallback = kind === "linked" ? "; linked it instead" : "";
     run.deps.log.warn(`cannot clone ${showText(rel)} into the worktree (${showText(outcome.reason)})${fallback}`);
   }
   return kind;
 }
-function destinationOpen(run, rel) {
-  return lstatOrUndefined(path10.join(run.worktree, rel)) === void 0 || isOwnLink(run, rel);
-}
 async function fallbackFor(run, rel) {
   if (!parentExists(run.worktree, rel)) {
     return "no-parent";
   }
-  if (!parentInside(run.worktree, rel) || !destinationOpen(run, rel)) {
+  if (!parentInside(run.worktree, rel) || !missingOrOwnLink(run, rel)) {
     return "present";
   }
-  if (path10.posix.basename(rel) === JS_DEPS) {
+  if (path11.posix.basename(rel) === JS_DEPS) {
     return cloneOrLink(run, rel);
   }
   return ensureLink(run, rel);
@@ -2231,11 +2737,11 @@ var init_fallback = __esm({
 });
 
 // src/worktree-add/cleanup.ts
-import fs12 from "node:fs";
-import path11 from "node:path";
+import fs13 from "node:fs";
+import path12 from "node:path";
 function withoutTrailingSeparators(file) {
   let result = file;
-  while (result.length > 1 && (result.endsWith("/") || result.endsWith(path11.sep))) {
+  while (result.length > 1 && (result.endsWith("/") || result.endsWith(path12.sep))) {
     result = result.slice(0, -1);
   }
   return result;
@@ -2259,7 +2765,7 @@ function refusal(rel) {
   if (rel.length === 0) {
     return "refused an empty path";
   }
-  if (path11.isAbsolute(rel)) {
+  if (path12.isAbsolute(rel)) {
     return `refused an absolute path: ${showText(rel)}`;
   }
   if (rel.split(/[/\\]/u).includes("..")) {
@@ -2279,16 +2785,16 @@ function removeSafely(root, rel) {
   if (!parentInside(root, clean)) {
     return { ok: false, reason: `refused a path whose parent is not inside ${showText(root)}: ${showText(clean)}` };
   }
-  const full = path11.join(root, clean);
+  const full = path12.join(root, clean);
   const stats = lstatOrUndefined(full);
   if (stats === void 0) {
     return { ok: true };
   }
   try {
     if (stats.isDirectory()) {
-      fs12.rmSync(full, { recursive: true, force: true });
+      fs13.rmSync(full, { recursive: true, force: true });
     } else {
-      fs12.unlinkSync(full);
+      fs13.unlinkSync(full);
     }
     return { ok: true };
   } catch (error) {
@@ -2300,7 +2806,7 @@ function isManagerArtifact(rel) {
   return TARGET_NAMES.has(name) || ROOT_ARTIFACTS.has(rel);
 }
 function removeNewYarnFolder(dir) {
-  const full = path11.join(dir, YARN_FOLDER);
+  const full = path12.join(dir, YARN_FOLDER);
   if (lstatOrUndefined(full)?.isDirectory() !== true) {
     return { ok: true };
   }
@@ -2311,8 +2817,8 @@ function removeNewYarnFolder(dir) {
     }
   }
   try {
-    if (fs12.readdirSync(full).length === 0) {
-      fs12.rmdirSync(full);
+    if (fs13.readdirSync(full).length === 0) {
+      fs13.rmdirSync(full);
     }
     return { ok: true };
   } catch (error) {
@@ -2373,8 +2879,8 @@ var init_cleanup = __esm({
 });
 
 // src/worktree-add/privateArea.ts
-import fs13 from "node:fs";
-import path12 from "node:path";
+import fs14 from "node:fs";
+import path13 from "node:path";
 async function privateDir(deps, worktree) {
   const result = await deps.runner.run({ file: "git", args: ["-C", worktree, "rev-parse", "--absolute-git-dir"] });
   const dir = result.stdout.trim();
@@ -2404,27 +2910,27 @@ function logFileName(manager, projectDir) {
   return `${LOG_PREFIX}-${nameSafe(manager)}-${nameSafe(trimmed)}.log`;
 }
 function writeInstallLog(dir, fileName, text) {
-  const file = path12.join(dir, fileName);
-  const noFollow = fs13.constants.O_NOFOLLOW ?? 0;
-  const flags = fs13.constants.O_WRONLY | fs13.constants.O_CREAT | fs13.constants.O_TRUNC | noFollow;
+  const file = path13.join(dir, fileName);
+  const noFollow = fs14.constants.O_NOFOLLOW ?? 0;
+  const flags = fs14.constants.O_WRONLY | fs14.constants.O_CREAT | fs14.constants.O_TRUNC | noFollow;
   let fd;
   try {
-    fd = fs13.openSync(file, flags, LOG_MODE);
-    fs13.fchmodSync(fd, LOG_MODE);
-    fs13.writeFileSync(fd, text);
+    fd = fs14.openSync(file, flags, LOG_MODE);
+    fs14.fchmodSync(fd, LOG_MODE);
+    fs14.writeFileSync(fd, text);
     return { ok: true, path: file };
   } catch (error) {
     return { ok: false, reason: errorCode(error) };
   } finally {
     if (fd !== void 0) {
-      fs13.closeSync(fd);
+      fs14.closeSync(fd);
     }
   }
 }
 function readMarks(dir) {
   let text;
   try {
-    text = fs13.readFileSync(path12.join(dir, PARTIAL_MARKER), "utf8");
+    text = fs14.readFileSync(path13.join(dir, PARTIAL_MARKER), "utf8");
   } catch (error) {
     return errorCode(error) === "ENOENT" ? [] : void 0;
   }
@@ -2434,12 +2940,12 @@ function readPartialMarks(dir) {
   return readMarks(dir) ?? [];
 }
 function writePartialMarks(dir, rels) {
-  const file = path12.join(dir, PARTIAL_MARKER);
+  const file = path13.join(dir, PARTIAL_MARKER);
   try {
     if (rels.length === 0) {
-      fs13.rmSync(file, { force: true });
+      fs14.rmSync(file, { force: true });
     } else {
-      fs13.writeFileSync(file, `${rels.join("\n")}
+      fs14.writeFileSync(file, `${rels.join("\n")}
 `);
     }
     return true;
@@ -2478,15 +2984,22 @@ var init_privateArea = __esm({
 });
 
 // src/worktree-add/leftovers.ts
-import path13 from "node:path";
-function markOwner(projectDirs, rel) {
+import path14 from "node:path";
+function deepestAbove(sites, rel) {
   let best;
-  for (const dir of projectDirs) {
-    if (isAtOrAbove(dir, rel) && (best === void 0 || dir.length > best.length)) {
-      best = dir;
+  for (const site of sites) {
+    if (isAtOrAbove(site.dir, rel) && (best === void 0 || site.dir.length > best.dir.length)) {
+      best = site;
     }
   }
   return best;
+}
+function markOwner(sites, rel) {
+  const ecosystem = path14.posix.basename(rel) === JS_DEPS ? "js" : "uv";
+  return deepestAbove(
+    sites.filter((site) => site.ecosystem === ecosystem),
+    rel
+  ) ?? deepestAbove(sites, rel);
 }
 function removeMarkedLeftovers(scope, owns) {
   const dir = scope.privateDir;
@@ -2511,7 +3024,7 @@ function removeMarkedLeftovers(scope, owns) {
   if (firstReason === void 0) {
     return { ok: true };
   }
-  const command = removalCommand(failed.map((rel) => path13.join(scope.worktree, rel)));
+  const command = removalCommand(failed.map((rel) => path14.join(scope.worktree, rel)));
   return {
     ok: false,
     failed,
@@ -2521,472 +3034,10 @@ function removeMarkedLeftovers(scope, owns) {
 var init_leftovers = __esm({
   "src/worktree-add/leftovers.ts"() {
     "use strict";
-    init_assign();
     init_cleanup();
+    init_paths();
     init_privateArea();
     init_text();
-  }
-});
-
-// src/worktree-add/proc.ts
-import { spawn } from "node:child_process";
-import { constants as osConstants } from "node:os";
-function errorCode2(error) {
-  if (error instanceof Error && "code" in error && typeof error.code === "string") {
-    return error.code;
-  }
-  return;
-}
-function childEnv(runnerEnv, requestEnv) {
-  const result = /* @__PURE__ */ new Map();
-  for (const [name, value] of Object.entries(runnerEnv)) {
-    if (value !== void 0) {
-      result.set(name, value);
-    }
-  }
-  for (const [name, value] of Object.entries(requestEnv ?? {})) {
-    if (value === void 0) {
-      result.delete(name);
-    } else {
-      result.set(name, value);
-    }
-  }
-  return Object.fromEntries(result);
-}
-function exitCodeOf(code, signal) {
-  if (code !== null) {
-    return code;
-  }
-  if (signal !== null) {
-    return 128 + osConstants.signals[signal];
-  }
-  return 1;
-}
-function signalGroup(pid, signal) {
-  if (pid === void 0) {
-    return;
-  }
-  try {
-    process.kill(-pid, signal);
-  } catch {
-    return;
-  }
-}
-function groupHasMembers(pid) {
-  if (pid === void 0) {
-    return false;
-  }
-  try {
-    process.kill(-pid, 0);
-    return true;
-  } catch (error) {
-    return errorCode2(error) !== "ESRCH";
-  }
-}
-function trySpawn(request, env) {
-  try {
-    const child = spawn(request.file, [...request.args], {
-      cwd: request.cwd,
-      env: childEnv(env, request.env),
-      stdio: ["ignore", "pipe", "pipe"],
-      detached: true
-    });
-    return { child };
-  } catch (error) {
-    return { error: errorCode2(error) ?? (error instanceof Error ? error.message : "spawn failed") };
-  }
-}
-function ignoreResult() {
-  return;
-}
-function superviseChild(child, timeoutMs) {
-  let resolveResult = ignoreResult;
-  const result = new Promise((resolve) => {
-    resolveResult = resolve;
-  });
-  const pid = child.pid;
-  const output = { stdout: "", stderr: "" };
-  const timers = [];
-  let settled = false;
-  let cancelled = false;
-  let timedOut = false;
-  let killStepDone = false;
-  let exitCode;
-  let closeCode;
-  const finish = (value) => {
-    if (settled) {
-      return;
-    }
-    settled = true;
-    for (const timer of timers) {
-      clearTimeout(timer);
-    }
-    resolveResult(timedOut ? { ...value, timedOut: true } : value);
-  };
-  const finishWhenQuiet = () => {
-    if (closeCode !== void 0 && (killStepDone || !groupHasMembers(pid))) {
-      finish({ code: closeCode, ...output });
-    }
-  };
-  const poll = () => {
-    finishWhenQuiet();
-    if (!settled) {
-      timers.push(setTimeout(poll, GROUP_POLL_MS));
-    }
-  };
-  const cancel = () => {
-    if (cancelled || settled) {
-      return;
-    }
-    cancelled = true;
-    signalGroup(pid, "SIGTERM");
-    timers.push(
-      setTimeout(() => {
-        if (groupHasMembers(pid)) {
-          signalGroup(pid, "SIGKILL");
-        }
-        killStepDone = true;
-        finishWhenQuiet();
-      }, KILL_GRACE_MS),
-      setTimeout(() => {
-        child.stdout.destroy();
-        child.stderr.destroy();
-        finish({ code: closeCode ?? exitCode ?? KILLED_CODE, ...output });
-      }, GIVE_UP_MS)
-    );
-    poll();
-  };
-  if (timeoutMs !== void 0) {
-    timers.push(
-      setTimeout(
-        () => {
-          if (cancelled || settled) {
-            return;
-          }
-          if (exitCode === void 0) {
-            timedOut = true;
-          }
-          cancel();
-        },
-        Math.min(timeoutMs, MAX_TIMER_MS)
-      )
-    );
-  }
-  child.stdout.setEncoding("utf8");
-  child.stderr.setEncoding("utf8");
-  child.stdout.on("data", (chunk) => {
-    output.stdout += chunk;
-  });
-  child.stderr.on("data", (chunk) => {
-    output.stderr += chunk;
-  });
-  child.on("error", (error) => {
-    finish({ code: SPAWN_FAILED_CODE, ...output, spawnError: errorCode2(error) ?? error.message });
-  });
-  child.on("exit", (code, signal) => {
-    exitCode = exitCodeOf(code, signal);
-  });
-  child.on("close", (code, signal) => {
-    closeCode = exitCodeOf(code, signal);
-    if (cancelled) {
-      finishWhenQuiet();
-    } else {
-      finish({ code: closeCode, ...output });
-    }
-  });
-  return { cancel, result };
-}
-function runCommand(request, env, running) {
-  const attempt = trySpawn(request, env);
-  if ("error" in attempt) {
-    return Promise.resolve({ code: SPAWN_FAILED_CODE, stdout: "", stderr: "", spawnError: attempt.error });
-  }
-  const supervised = superviseChild(attempt.child, request.timeoutMs);
-  running.add(supervised);
-  return supervised.result.finally(() => {
-    running.delete(supervised);
-  });
-}
-async function terminateRunning(running) {
-  const pending = [...running];
-  for (const supervised of pending) {
-    supervised.cancel();
-  }
-  await Promise.all(pending.map((supervised) => supervised.result));
-}
-function createProcessRunner(env) {
-  const running = /* @__PURE__ */ new Set();
-  return {
-    run: (request) => runCommand(request, env, running),
-    terminateAll: () => terminateRunning(running)
-  };
-}
-function pidAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 1) {
-    return false;
-  }
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return errorCode2(error) === "EPERM";
-  }
-}
-var SPAWN_FAILED_CODE, KILLED_CODE, KILL_GRACE_MS, GIVE_UP_MS, GROUP_POLL_MS, MAX_TIMER_MS;
-var init_proc = __esm({
-  "src/worktree-add/proc.ts"() {
-    "use strict";
-    SPAWN_FAILED_CODE = 127;
-    KILLED_CODE = 137;
-    KILL_GRACE_MS = 5e3;
-    GIVE_UP_MS = 1e4;
-    GROUP_POLL_MS = 50;
-    MAX_TIMER_MS = 2147483647;
-  }
-});
-
-// src/worktree-add/managers.ts
-import fs14 from "node:fs";
-import path14 from "node:path";
-function executableOf(manager) {
-  return EXECUTABLES[manager];
-}
-function isJsFamily(name) {
-  return Object.hasOwn(FAMILY_LOCKS, name);
-}
-function readHead(file) {
-  let fd;
-  try {
-    fd = fs14.openSync(file, "r");
-    const buffer = Buffer.alloc(HEAD_BYTES);
-    const size = fs14.readSync(fd, buffer, 0, HEAD_BYTES, 0);
-    return buffer.subarray(0, size).toString("utf8");
-  } catch {
-    return;
-  } finally {
-    if (fd !== void 0) {
-      fs14.closeSync(fd);
-    }
-  }
-}
-function readPackageManagerField(projectDir) {
-  let parsed;
-  try {
-    parsed = JSON.parse(fs14.readFileSync(path14.join(projectDir, "package.json"), "utf8"));
-  } catch {
-    return { kind: "absent" };
-  }
-  if (typeof parsed !== "object" || !parsed || !("packageManager" in parsed)) {
-    return { kind: "absent" };
-  }
-  const value = parsed.packageManager;
-  if (typeof value !== "string") {
-    return { kind: "absent" };
-  }
-  const spec = value.trim();
-  const match = /^([a-z]+)@(\d+)\.\d+\.\d+(?:[-+].*)?$/.exec(spec);
-  const name = match?.[1];
-  const major = match?.[2];
-  if (name === void 0 || major === void 0 || !isJsFamily(name)) {
-    return { kind: "invalid", text: value };
-  }
-  return { kind: "pinned", pin: { family: name, major: Number(major), spec } };
-}
-function exactMajor(name, major) {
-  return { text: `${name} ${major}`, accepts: (found) => found === major };
-}
-function yarnKind(projectDir) {
-  const head = readHead(path14.join(projectDir, "yarn.lock")) ?? "";
-  if (/^__metadata:/m.test(head)) {
-    return "yarn-berry";
-  }
-  if (/^# yarn lockfile v1\s*$/m.test(head)) {
-    return "yarn-classic";
-  }
-  return;
-}
-function yarnPathMajor(projectDir) {
-  const rc = readHead(path14.join(projectDir, ".yarnrc.yml")) ?? "";
-  const match = /^yarnPath:\s*["']?([^"'\n#]*?)["']?\s*(?:#.*)?$/m.exec(rc);
-  const release = /(?:^|\/)yarn-(\d+)\.\d+\.\d+\.cjs$/.exec(match?.[1] ?? "");
-  return release?.[1] === void 0 ? void 0 : Number(release[1]);
-}
-function berryExpectation(projectDir) {
-  const pinned = yarnPathMajor(projectDir);
-  if (pinned !== void 0) {
-    return exactMajor("yarn", pinned);
-  }
-  return { text: "yarn 2 or newer", accepts: (major) => major >= 2 };
-}
-function pnpmExpectation(projectDir) {
-  const head = readHead(path14.join(projectDir, "pnpm-lock.yaml")) ?? "";
-  const match = /^lockfileVersion:\s*["']?(\d+)(?:\.\d+)?["']?\s*$/m.exec(head);
-  const majors = match?.[1] === void 0 ? void 0 : PNPM_LOCK_MAJORS.get(Number(match[1]));
-  if (majors === void 0) {
-    return;
-  }
-  return { text: `pnpm ${majors.join(" or ")}`, accepts: (major) => majors.includes(major) };
-}
-function fromLock(projectDir, family) {
-  switch (family) {
-    case "npm":
-    case "bun": {
-      return { kind: "manager", manager: family, expected: void 0 };
-    }
-    case "pnpm": {
-      return { kind: "manager", manager: "pnpm", expected: pnpmExpectation(projectDir) };
-    }
-    case "yarn": {
-      const kind = yarnKind(projectDir);
-      if (kind === void 0) {
-        return {
-          kind: "conflict",
-          reason: 'yarn.lock has neither a "# yarn lockfile v1" header nor a __metadata: section'
-        };
-      }
-      const expected = kind === "yarn-berry" ? berryExpectation(projectDir) : exactMajor("yarn", 1);
-      return { kind: "manager", manager: kind, expected };
-    }
-  }
-}
-function pinLockMismatch(projectDir, pin) {
-  const shownPin = pin.spec.replace(/\+.*$/, "");
-  if (pin.family === "yarn") {
-    const kind = yarnKind(projectDir);
-    if (kind === "yarn-berry" && pin.major === 1) {
-      return `packageManager names ${shownPin} but yarn.lock is a yarn 2 or newer (berry) lock file`;
-    }
-    if (kind === "yarn-classic" && pin.major !== 1) {
-      return `packageManager names ${shownPin} but yarn.lock is a yarn 1 lock file`;
-    }
-    return;
-  }
-  if (pin.family === "pnpm") {
-    const allowed = pnpmExpectation(projectDir);
-    if (allowed !== void 0 && !allowed.accepts(pin.major)) {
-      return `packageManager names ${shownPin} but pnpm-lock.yaml is written by ${allowed.text}`;
-    }
-  }
-  return;
-}
-function fromPin(projectDir, pin, lockNames) {
-  const own = FAMILY_LOCKS[pin.family];
-  if (!lockNames.some((name) => own.includes(name))) {
-    return {
-      kind: "conflict",
-      reason: `packageManager names ${pin.family} ${pin.major} but ${own.join(" / ")} is missing (found ${lockNames.join(", ")})`
-    };
-  }
-  const mismatch = pinLockMismatch(projectDir, pin);
-  if (mismatch !== void 0) {
-    return { kind: "conflict", reason: mismatch };
-  }
-  const { family } = pin;
-  let manager;
-  if (family === "yarn") {
-    manager = pin.major === 1 ? "yarn-classic" : "yarn-berry";
-  } else {
-    manager = family;
-  }
-  return { kind: "manager", manager, expected: exactMajor(pin.family, pin.major) };
-}
-function chooseManager(projectDir, ecosystem, lockNames) {
-  if (ecosystem === "uv") {
-    return { kind: "manager", manager: "uv", expected: void 0 };
-  }
-  const field = readPackageManagerField(projectDir);
-  if (field.kind === "invalid") {
-    return {
-      kind: "conflict",
-      reason: `package.json packageManager "${field.text}" is not a supported NAME@X.Y.Z`
-    };
-  }
-  if (field.kind === "pinned") {
-    return fromPin(projectDir, field.pin, lockNames);
-  }
-  const jsLocks = lockNames.filter((name) => LOCK_FAMILIES.has(name));
-  const families = new Set(jsLocks.map((name) => LOCK_FAMILIES.get(name)));
-  const [family, ...others] = families;
-  if (family === void 0) {
-    return { kind: "conflict", reason: "no JS lock file was found" };
-  }
-  if (others.length > 0) {
-    return {
-      kind: "conflict",
-      reason: `several package managers' lock files (${jsLocks.join(", ")}) and no packageManager in package.json`
-    };
-  }
-  return fromLock(projectDir, family);
-}
-function failureReason(result, timeoutMs) {
-  if (result.timedOut === true) {
-    return `--version timed out after ${timeoutMs} ms`;
-  }
-  if (result.spawnError !== void 0) {
-    return `could not start: ${result.spawnError}`;
-  }
-  const detail = (result.stderr.trim() || result.stdout.trim()).split("\n", 1)[0] ?? "";
-  return `--version exited with code ${result.code}${detail ? `: ${detail}` : ""}`;
-}
-async function checkManagerVersion(deps, manager, expected, projectDir, timeoutMs = VERSION_TIMEOUT_MS) {
-  const result = await deps.runner.run({
-    file: executableOf(manager),
-    args: ["--version"],
-    cwd: projectDir,
-    timeoutMs
-  });
-  if (result.code === SPAWN_FAILED_CODE && result.spawnError === "ENOENT") {
-    return { kind: "missing" };
-  }
-  const expectedText = expected?.text ?? `${executableOf(manager)} (any version)`;
-  if (result.code !== 0 || result.timedOut === true) {
-    return { kind: "mismatch", expected: expectedText, found: `unknown (${failureReason(result, timeoutMs)})` };
-  }
-  const match = /(\d+)\.\d+(?:\.\d+)?/.exec(result.stdout);
-  const version = match?.[0];
-  const major = match?.[1];
-  if (version === void 0 || major === void 0) {
-    return { kind: "mismatch", expected: expectedText, found: "unknown (no version in --version output)" };
-  }
-  if (expected !== void 0 && !expected.accepts(Number(major))) {
-    return { kind: "mismatch", expected: expected.text, found: version };
-  }
-  return { kind: "ok", version };
-}
-var VERSION_TIMEOUT_MS, HEAD_BYTES, LOCK_FAMILIES, FAMILY_LOCKS, EXECUTABLES, PNPM_LOCK_MAJORS;
-var init_managers = __esm({
-  "src/worktree-add/managers.ts"() {
-    "use strict";
-    init_proc();
-    VERSION_TIMEOUT_MS = 2e4;
-    HEAD_BYTES = 64 * 1024;
-    LOCK_FAMILIES = /* @__PURE__ */ new Map([
-      ["package-lock.json", "npm"],
-      ["npm-shrinkwrap.json", "npm"],
-      ["pnpm-lock.yaml", "pnpm"],
-      ["yarn.lock", "yarn"],
-      ["bun.lock", "bun"],
-      ["bun.lockb", "bun"]
-    ]);
-    FAMILY_LOCKS = {
-      npm: ["package-lock.json", "npm-shrinkwrap.json"],
-      pnpm: ["pnpm-lock.yaml"],
-      yarn: ["yarn.lock"],
-      bun: ["bun.lock", "bun.lockb"]
-    };
-    EXECUTABLES = {
-      npm: "npm",
-      pnpm: "pnpm",
-      "yarn-classic": "yarn",
-      "yarn-berry": "yarn",
-      bun: "bun",
-      uv: "uv"
-    };
-    PNPM_LOCK_MAJORS = /* @__PURE__ */ new Map([
-      [9, [9, 10]],
-      [6, [8]],
-      [5, [6, 7]]
-    ]);
   }
 });
 
@@ -2997,6 +3048,9 @@ function ranManager(outcome) {
 }
 function worktreeRel(project, rel) {
   return project.dir === "" ? rel : `${project.dir}/${rel}`;
+}
+function projectRel(project, rel) {
+  return project.dir === "" ? rel : rel.slice(project.dir.length + 1);
 }
 function defaultFolder(project) {
   return worktreeRel(project, project.ecosystem === "js" ? JS_DEPS : UV_VENV);
@@ -3070,7 +3124,10 @@ function logWrongVersion(run, expected, found) {
   });
 }
 function clearProjectLeftovers(ctx, project, label) {
-  const removal = removeMarkedLeftovers(ctx, (rel) => markOwner(ctx.projectDirs, rel) === project.dir);
+  const removal = removeMarkedLeftovers(ctx, (rel) => {
+    const owner = markOwner(ctx.projects, rel);
+    return owner?.dir === project.dir && owner.ecosystem === project.ecosystem;
+  });
   if (removal.ok) {
     return true;
   }
@@ -3082,13 +3139,29 @@ function blockedTargets(run) {
     (rel) => lstatOrUndefined(path15.join(run.ctx.worktree, rel)) !== void 0 && !isOwnLink(run.ctx, rel)
   );
 }
+function shownList(rels) {
+  return rels.map((rel) => showText(rel)).join(", ");
+}
 function warnBlocked(run, blocked) {
-  const shown = blocked.map((rel) => showText(rel)).join(", ");
+  const shown = shownList(blocked);
   const tail = blocked.length === 1 ? "already stands in the worktree and is left as it is" : "already stand in the worktree and are left as they are";
   const pronoun = blocked.length === 1 ? "it" : "them";
   run.ctx.deps.log.warn(`not installed with ${run.label}: ${shown} ${tail} (remove ${pronoun} and rerun to install)`);
 }
+function relink(run, unlinked) {
+  return unlinked.filter((rel) => makeLink(run.ctx, rel) === "created");
+}
+function warnRestored(run, restored) {
+  if (restored.length === 0) {
+    return;
+  }
+  const command = ["rm", "--", ...absolutePaths(run, restored).map((file) => shellQuote(file))].join(" ");
+  run.ctx.deps.log.warn(
+    `not installed with ${run.label}: the earlier link was restored for ${shownList(restored)}; remove it with ${showText(command)} before installing`
+  );
+}
 function unlinkOwnLinks(run) {
+  const unlinked = [];
   for (const rel of run.targets) {
     if (!isOwnLink(run.ctx, rel)) {
       continue;
@@ -3096,10 +3169,12 @@ function unlinkOwnLinks(run) {
     const result = removeSafely(run.ctx.worktree, rel);
     if (!result.ok) {
       run.ctx.deps.log.warn(`not installed with ${run.label}: ${showText(result.reason)}`);
-      return false;
+      warnRestored(run, relink(run, unlinked));
+      return;
     }
+    unlinked.push(rel);
   }
-  return true;
+  return unlinked;
 }
 function saveLog(run, output) {
   const dir = run.ctx.privateDir;
@@ -3148,7 +3223,7 @@ async function cleanUp(run, before) {
     `cannot remove the partial install: ${showText(reason)}; remove it with: ${showText(command)}`
   );
 }
-async function reportFailure(run, result, before) {
+async function reportFailure(run, result, state) {
   const { env, deps } = run.ctx;
   const output = maskSecrets(result.output, env);
   const lastOutput = maskSecrets(result.lastOutput, env);
@@ -3163,7 +3238,8 @@ async function reportFailure(run, result, before) {
     timedOut: result.timedOut,
     lockChanged: result.lockChanged
   });
-  await cleanUp(run, before);
+  await cleanUp(run, state.before);
+  const restored = relink(run, state.unlinked);
   logGroup(run, {
     failure,
     keyLines: keyErrorLines(lastOutput),
@@ -3171,6 +3247,7 @@ async function reportFailure(run, result, before) {
     lifecycleStep: lastLifecycleStep(lastOutput),
     silent: result.lastOutput.trim().length === 0
   });
+  warnRestored(run, restored);
 }
 async function installChecked(run, deadlineMs) {
   const { deps } = run.ctx;
@@ -3179,15 +3256,20 @@ async function installChecked(run, deadlineMs) {
     warnBlocked(run, blocked);
     return { kind: "not-installed" };
   }
-  if (!unlinkOwnLinks(run)) {
-    return { kind: "not-installed" };
-  }
-  const before = await untrackedEntries(deps, projectPath(run));
-  if (before === void 0) {
+  const listed = await untrackedEntries(deps, projectPath(run));
+  if (listed === void 0) {
     deps.log.warn(
       `not installed with ${run.label}: cannot list the untracked entries of ${showText(projectPath(run))}`
     );
     return { kind: "not-installed" };
+  }
+  const unlinked = unlinkOwnLinks(run);
+  if (unlinked === void 0) {
+    return { kind: "not-installed" };
+  }
+  const before = new Set(listed);
+  for (const rel of unlinked) {
+    before.delete(projectRel(run.project, rel));
   }
   addMarks(run, run.targets);
   const result = await runInstall(deps, {
@@ -3205,7 +3287,7 @@ async function installChecked(run, deadlineMs) {
     clearMarks(run, run.targets);
     return { kind: "installed" };
   }
-  await reportFailure(run, result, before);
+  await reportFailure(run, result, { before, unlinked });
   return { kind: "failed" };
 }
 async function installProject(ctx, project, deadlineMs, choice) {
@@ -3239,6 +3321,11 @@ async function installProject(ctx, project, deadlineMs, choice) {
     logWrongVersion(run, version.expected, version.found);
     return { kind: "not-installed" };
   }
+  if (version.kind === "differs") {
+    ctx.deps.log.info(
+      `installing with ${run.label} although package.json packageManager names ${version.expected}, found ${version.found} (npm does not enforce packageManager)`
+    );
+  }
   return installChecked(run, deadlineMs);
 }
 var CONFLICT_MANAGER, SHELL_SAFE, NO_PRIVATE_DIR;
@@ -3248,6 +3335,7 @@ var init_installProject = __esm({
     init_attempt();
     init_cleanup();
     init_failures();
+    init_fallback();
     init_leftovers();
     init_managers();
     init_mask();
@@ -3262,11 +3350,11 @@ var init_installProject = __esm({
 
 // src/worktree-add/installStage.ts
 import path16 from "node:path";
-function shownList(rels) {
+function shownList2(rels) {
   return rels.map((rel) => showText(rel)).join(", ");
 }
 function groupTexts(results, groups) {
-  return groups.map(([kind, text]) => ({ text, rels: results.filter((result) => result.kind === kind) })).filter((group) => group.rels.length > 0).map((group) => group.text(shownList(group.rels.map((result) => result.rel))));
+  return groups.map(([kind, text]) => ({ text, rels: results.filter((result) => result.kind === kind) })).filter((group) => group.rels.length > 0).map((group) => group.text(shownList2(group.rels.map((result) => result.rel))));
 }
 function paths(request) {
   return { main: request.main, worktree: request.worktree };
@@ -3281,7 +3369,7 @@ function commandOf({ project, choice }) {
   };
 }
 function overlaps(a, b) {
-  return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+  return isAtOrAbove(a, b) || isAtOrAbove(b, a);
 }
 async function skipAll(request, dir) {
   const { deps, worktree } = request;
@@ -3321,9 +3409,11 @@ async function sandboxFallback(stage, planned) {
   const tail = commands.length === 0 ? "" : `; ${later}: ${commands}`;
   ctx.deps.log.info(`installs skipped: the network is disabled in this sandbox${done.join("")}${tail}`);
 }
-function orphanReason(rel) {
+function orphanReason(rel, projects) {
   if (path16.posix.basename(rel) === JS_DEPS) {
-    return `${showText(rel)} belongs to no project with a supported lock file`;
+    const parent = rel.includes("/") ? path16.posix.dirname(rel) : "";
+    const owner = projects.filter((project) => project.ecosystem === "js" && isAtOrAbove(project.dir, parent)).toSorted((a, b) => b.dir.length - a.dir.length)[0];
+    return owner === void 0 ? `${showText(rel)} belongs to no project with a supported lock file` : `${showText(rel)} is outside the workspaces of the JS project in ${projectPlace(owner)}`;
   }
   return `${showText(rel)} is a Python environment with no uv.lock next to it, and poetry, pip and pipenv are not installed automatically`;
 }
@@ -3333,10 +3423,10 @@ function kindText(result) {
   }
   return ORPHAN_KIND_TEXT[result.kind];
 }
-async function handleOrphans(request, orphans) {
+async function handleOrphans(request, orphans, projects) {
   const results = await applyFallback(request.deps, paths(request), request.transfer, orphans);
   for (const result of results) {
-    request.deps.log.warn(`not installed: ${orphanReason(result.rel)}; ${kindText(result)}`);
+    request.deps.log.warn(`not installed: ${orphanReason(result.rel, projects)}; ${kindText(result)}`);
   }
 }
 async function handleLinkOnly(request, planned) {
@@ -3351,7 +3441,7 @@ async function handleLinkOnly(request, planned) {
 }
 function toolMissingTail(project, results) {
   if (results.length === 0) {
-    return `nothing to link: ${shownList(targetFolders(project))} stays missing`;
+    return `nothing to link: ${shownList2(targetFolders(project))} stays missing`;
   }
   return groupTexts(results, TOOL_MISSING_GROUPS).join("; ");
 }
@@ -3443,14 +3533,14 @@ async function excludeNewTargets(request, planned) {
     fresh.map((rel) => anchoredPattern(rel))
   );
 }
-function stageContext(request, dir, projectDirs) {
+function stageContext(request, dir, projects) {
   return {
     deps: request.deps,
     env: request.env,
     main: request.main,
     worktree: request.worktree,
     privateDir: dir,
-    projectDirs,
+    projects,
     nowMs: request.nowMs,
     networkTimeoutMs: request.timing.networkTimeoutMs,
     progressMs: request.timing.progressMs
@@ -3458,11 +3548,8 @@ function stageContext(request, dir, projectDirs) {
 }
 async function runInstallStage(request) {
   const { deps, worktree, depRels } = request;
-  await addExcludePatterns(
-    deps,
-    worktree,
-    depRels.map((rel) => anchoredPattern(rel))
-  );
+  const temps = depRels.length > 0 ? [TEMP_PATTERN] : [];
+  await addExcludePatterns(deps, worktree, [...temps, ...depRels.map((rel) => anchoredPattern(rel))]);
   const dir = await privateDir(deps, worktree);
   if (request.noInstall) {
     await skipAll(request, dir);
@@ -3485,15 +3572,11 @@ async function runInstallStage(request) {
   }));
   const stage = {
     request,
-    ctx: stageContext(
-      request,
-      dir,
-      found.map((project) => project.dir)
-    )
+    ctx: stageContext(request, dir, found)
   };
   reportManual(request, planned);
   const autoProjects = planned.filter((plan) => plan.project.auto);
-  await handleOrphans(request, assignment.orphans);
+  await handleOrphans(request, assignment.orphans, found);
   await handleLinkOnly(request, autoProjects);
   if (request.env[SANDBOX_NETWORK_VARIABLE] === "1") {
     await sandboxFallback(stage, autoProjects);
@@ -3839,14 +3922,11 @@ function usableEntries(deps, rels) {
   }
   return kept;
 }
-function destinationOpen2(run, rel, kind) {
-  if (lstatOrUndefined(path19.join(run.worktree, rel)) === void 0) {
-    return true;
-  }
-  return kind !== "link" && isOwnLink(run, rel);
+function destinationOpen(run, rel, kind) {
+  return kind === "copy" ? missingOrOwnLink(run, rel) : lstatOrUndefined(path19.join(run.worktree, rel)) === void 0;
 }
 async function syncEntry(run, rel, kind) {
-  if (kind === "skip" || kind === "dep" || !parentInside(run.worktree, rel) || !destinationOpen2(run, rel, kind)) {
+  if (kind === "skip" || kind === "dep" || !parentInside(run.worktree, rel) || !destinationOpen(run, rel, kind)) {
     return;
   }
   switch (kind) {
@@ -3874,13 +3954,13 @@ async function syncIgnored(deps, main2, worktree, transfer) {
   const listed = await listIgnored(deps, main2);
   if (listed === void 0) {
     deps.log.warn(
-      `cannot list the ignored files of ${showText(main2)}; nothing synced into the worktree and the dependency fallback is skipped`
+      `cannot list the ignored files of ${showText(main2)}; nothing synced into the worktree, the dependency fallback is skipped and nested projects are not installed automatically`
     );
     return void 0;
   }
   const entries = usableEntries(deps, listed).map((rel) => ({ rel, kind: entryClass(main2, rel) }));
   const run = { deps, main: main2, worktree, transfer, linked: [] };
-  if (entries.some((entry) => entry.kind === "copy" || entry.kind === "dep")) {
+  if (entries.some((entry) => entry.kind === "copy")) {
     await addExcludePatterns(deps, worktree, [TEMP_PATTERN]);
   }
   for (const entry of entries) {
@@ -4085,7 +4165,7 @@ async function syncQuietly(deps, repo, target, transfer) {
     return await syncIgnored(deps, repo.main, target.path, transfer);
   } catch (error) {
     deps.log.warn(
-      `cannot sync ignored paths into the worktree: ${messageOf(error)}; the dependency fallback from the main clone is skipped`
+      `cannot sync ignored paths into the worktree: ${messageOf(error)}; the dependency fallback from the main clone is skipped and nested projects are not installed automatically`
     );
     return void 0;
   }

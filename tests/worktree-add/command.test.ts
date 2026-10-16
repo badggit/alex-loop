@@ -106,14 +106,18 @@ function tipOf(f: Fixture, ref: string): string {
     return gitSync(f.env, ['-C', f.main, 'rev-parse', ref]).trim();
 }
 
-// The first request that matches is rejected with "exclude broke" without running; the rest go to inner.
-function rejectingFirst(inner: CommandRunner, match: (_request: CommandRequest) => boolean): CommandRunner {
+// The first request that matches is rejected with MESSAGE without running; the rest go to inner.
+function rejectingFirst(
+    inner: CommandRunner,
+    match: (_request: CommandRequest) => boolean,
+    message: string
+): CommandRunner {
     let rejected = false;
     return {
         run: (request) => {
             if (!rejected && match(request)) {
                 rejected = true;
-                return Promise.reject(new Error('exclude broke'));
+                return Promise.reject(new Error(message));
             }
             return inner.run(request);
         },
@@ -328,7 +332,9 @@ await test('an undefined timing value keeps its default', async (t) => {
 
 await test('a sync that throws still installs from lock files and warns once with the thrown message', async (t) => {
     const f = makeInstallFixture(t);
-    const runner = recording(rejectingFirst(f.deps.runner, (request) => request.args.includes('info/exclude')));
+    const runner = recording(
+        rejectingFirst(f.deps.runner, (request) => request.args.includes('--ignored'), 'listing broke')
+    );
     f.deps.runner = runner;
     const target = okPath(await runWith(f, ['--suffix', 'inst-8'], {}));
     assert.equal(target, path.join(f.root, 'app-inst-8'));
@@ -336,8 +342,8 @@ await test('a sync that throws still installs from lock files and warns once wit
     assert.deepEqual(warnLines(f).length, 1, all);
     assert.ok(
         warnLines(f)[0]?.endsWith(
-            'warn cannot sync ignored paths into the worktree: exclude broke; ' +
-                'the dependency fallback from the main clone is skipped'
+            'warn cannot sync ignored paths into the worktree: listing broke; ' +
+                'the dependency fallback from the main clone is skipped and nested projects are not installed automatically'
         ),
         all
     );
