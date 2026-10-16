@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test, type TestContext } from 'node:test';
 
+import { SANDBOX_NETWORK_VARIABLE } from '../../src/worktree-add/installStage.ts';
 import { createLogger } from '../../src/worktree-add/log.ts';
 import { main as runMain } from '../../src/worktree-add/main.ts';
 import { TEMP_PREFIX } from '../../src/worktree-add/place.ts';
@@ -36,6 +37,7 @@ const CLI = path.resolve(import.meta.dirname, '../../src/worktree-add/cli.ts');
 const LINUX_ONLY = process.platform === 'linux' ? false : 'macOS pins /bin/cp';
 const LOG_LINE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z (info|warn|error) /u;
 const IGNORE_RULES = '.env\ndocs.local/\nnode_modules/\n';
+const ORPHAN_LINE = 'warn not installed: node_modules belongs to no project with a supported lock file; ';
 const POLL_MS = 50;
 const PID_WAIT_MS = 20_000;
 const SIGNAL_LIMIT_MS = 10_000;
@@ -85,7 +87,8 @@ function runCli(env: Env, args: readonly string[], cwd: string): Promise<CliResu
 
 function makeFixture(t: TestContext, name = 'app'): Fixture {
     const root = tempRoot(t);
-    const env = testEnv(root);
+    // Cleared so the install stage handles an orphan node_modules the same way inside a sandbox without network.
+    const env: Env = { ...testEnv(root), [SANDBOX_NETWORK_VARIABLE]: undefined };
     const { main } = makeRepo(root, env, name);
     commitFile(env, main, '.gitignore', IGNORE_RULES);
     fs.writeFileSync(path.join(main, '.env'), 'A=1\n');
@@ -295,6 +298,7 @@ await test(
         assert.equal(result.code, 0, result.stderr);
         const worktree = path.join(f.root, 'app-rep-2');
         assert.ok(fs.lstatSync(path.join(worktree, 'node_modules')).isDirectory());
+        assert.ok(result.stderr.includes(`${ORPHAN_LINE}cloned it`), result.stderr);
         assert.ok(fs.lstatSync(path.join(worktree, 'docs.local')).isSymbolicLink());
         assert.ok(fs.lstatSync(path.join(worktree, '.env')).isFile());
         gitSync(f.env, ['-C', f.main, 'worktree', 'remove', worktree]);
@@ -313,6 +317,7 @@ await test('a cp that cannot clone leaves node_modules as an own link', { skip: 
     const link = path.join(f.root, 'app-rep-3', 'node_modules');
     assert.ok(fs.lstatSync(link).isSymbolicLink());
     assert.equal(fs.readlinkSync(link), path.join(f.main, 'node_modules'));
+    assert.ok(result.stderr.includes(`${ORPHAN_LINE}linked it;`), result.stderr);
 });
 
 await test('a relative --parent is resolved from the caller directory', async (t) => {

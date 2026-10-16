@@ -25,12 +25,56 @@ function parsedParent(value: string): string | undefined {
 }
 
 await test('parseArgs accepts the suffix alone and options in any order', () => {
-    assert.deepEqual(parseArgs(['--suffix', SUFFIX], HOME), { kind: 'ok', suffix: SUFFIX, parent: undefined });
+    assert.deepEqual(parseArgs(['--suffix', SUFFIX], HOME), {
+        kind: 'ok',
+        suffix: SUFFIX,
+        parent: undefined,
+        install: true,
+    });
     assert.deepEqual(parseArgs(['--parent', '../wt', '--suffix', 'x'], HOME), {
         kind: 'ok',
         suffix: 'x',
         parent: '../wt',
+        install: true,
     });
+});
+
+await test('parseArgs reads --no-install at any position', () => {
+    assert.deepEqual(parseArgs(['--no-install', '--suffix', 'a'], HOME), {
+        kind: 'ok',
+        suffix: 'a',
+        parent: undefined,
+        install: false,
+    });
+    assert.deepEqual(parseArgs(['--suffix', 'a', '--no-install'], HOME), {
+        kind: 'ok',
+        suffix: 'a',
+        parent: undefined,
+        install: false,
+    });
+    assert.deepEqual(parseArgs(['--suffix', 'a'], HOME), { kind: 'ok', suffix: 'a', parent: undefined, install: true });
+});
+
+await test('parseArgs keeps the --parent value next to --no-install', () => {
+    assert.deepEqual(parseArgs(['--suffix', 'a', '--no-install', '--parent', '../wt'], HOME), {
+        kind: 'ok',
+        suffix: 'a',
+        parent: '../wt',
+        install: false,
+    });
+    assert.deepEqual(parseArgs(['--parent', '~/wt', '--no-install', '--suffix', 'a'], HOME), {
+        kind: 'ok',
+        suffix: 'a',
+        parent: `${HOME}/wt`,
+        install: false,
+    });
+});
+
+await test('parseArgs refuses a repeated --no-install', () => {
+    assert.equal(
+        usageMessage(['--no-install', '--suffix', 'a', '--no-install']),
+        '--no-install can be given only once'
+    );
 });
 
 await test('parseArgs expands only a leading ~ and ~/', () => {
@@ -43,7 +87,12 @@ await test('parseArgs expands only a leading ~ and ~/', () => {
 
 await test('parseArgs accepts suffixes within the rule', () => {
     for (const suffix of ['a', '1.2_x-y', 'a'.repeat(100)]) {
-        assert.deepEqual(parseArgs(['--suffix', suffix], HOME), { kind: 'ok', suffix, parent: undefined });
+        assert.deepEqual(parseArgs(['--suffix', suffix], HOME), {
+            kind: 'ok',
+            suffix,
+            parent: undefined,
+            install: true,
+        });
     }
 });
 
@@ -58,6 +107,14 @@ await test('parseArgs refuses missing, unknown, repeated and valueless options',
     assert.match(usageMessage(['--suffix', 'x', '--branch', 'b']), /unknown option: --branch/u);
     assert.match(usageMessage(['--suffix', 'x', '--suffix', 'y']), /--suffix can be given only once/u);
     assert.match(usageMessage(['--suffix']), /missing value for --suffix/u);
+    assert.match(
+        usageMessage(['--suffix', 'x', '--parent', '--no-install']),
+        /missing value for --parent: got the option --no-install/u
+    );
+    assert.match(
+        usageMessage(['--suffix', '--parent', '/tmp']),
+        /missing value for --suffix: got the option --parent/u
+    );
     assert.match(usageMessage(['--suffix', 'x', 'extra']), /unexpected argument: extra/u);
 });
 
@@ -83,6 +140,15 @@ await test('usageText names the options, the ~ expansion and the exit codes', ()
         assert.ok(text.includes(part), `usage text lacks ${part}`);
     }
     assert.match(text, /exit codes/iu);
+});
+
+await test('usageText names the --no-install flag and what it does', () => {
+    const text = usageText();
+    assert.ok(text.startsWith('Usage: worktree-add.mjs --suffix SUFFIX [--parent DIR] [--no-install]\n'), text);
+    assert.match(
+        text,
+        /^ {2}--no-install +skip the dependency installs; dependency folders are cloned or linked instead$/mu
+    );
 });
 
 await test('nodeVersionProblem accepts 22 and newer', () => {

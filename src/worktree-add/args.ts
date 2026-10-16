@@ -1,9 +1,13 @@
 import { hasControlCharacter, showText } from './text.ts';
 
 export type ParsedArgs =
-    { kind: 'ok'; suffix: string; parent: string | undefined } | { kind: 'help' } | { kind: 'usage'; message: string };
+    | { kind: 'ok'; suffix: string; parent: string | undefined; install: boolean }
+    | { kind: 'help' }
+    | { kind: 'usage'; message: string };
 
 type ValueOption = '--suffix' | '--parent';
+
+const NO_INSTALL = '--no-install';
 
 const MAX_SUFFIX = 100;
 const SUFFIX_PATTERN = /^[a-z0-9][a-z0-9._-]*$/u;
@@ -57,8 +61,16 @@ export function parseArgs(argv: readonly string[], home: string): ParsedArgs {
         return { kind: 'help' };
     }
     const values: Partial<Record<ValueOption, string>> = {};
+    let install = true;
     for (let index = 0; index < argv.length; index += 1) {
         const arg = argv[index] ?? '';
+        if (arg === NO_INSTALL) {
+            if (!install) {
+                return usage(`${NO_INSTALL} can be given only once`);
+            }
+            install = false;
+            continue;
+        }
         if (!isValueOption(arg)) {
             return usage(
                 arg.startsWith('-') ? `unknown option: ${showText(arg)}` : `unexpected argument: ${showText(arg)}`
@@ -70,6 +82,9 @@ export function parseArgs(argv: readonly string[], home: string): ParsedArgs {
         const value = argv[index + 1];
         if (value === undefined) {
             return usage(`missing value for ${arg}`);
+        }
+        if (value.startsWith('--')) {
+            return usage(`missing value for ${arg}: got the option ${showText(value)}`);
         }
         values[arg] = value;
         index += 1;
@@ -84,21 +99,22 @@ export function parseArgs(argv: readonly string[], home: string): ParsedArgs {
     }
     const parentValue = values['--parent'];
     if (parentValue === undefined) {
-        return { kind: 'ok', suffix, parent: undefined };
+        return { kind: 'ok', suffix, parent: undefined, install };
     }
     const expanded = expandParent(parentValue, home);
-    return expanded.ok ? { kind: 'ok', suffix, parent: expanded.parent } : usage(expanded.message);
+    return expanded.ok ? { kind: 'ok', suffix, parent: expanded.parent, install } : usage(expanded.message);
 }
 
 export function usageText(): string {
     return [
-        'Usage: worktree-add.mjs --suffix SUFFIX [--parent DIR]',
+        'Usage: worktree-add.mjs --suffix SUFFIX [--parent DIR] [--no-install]',
         '',
         'Creates or reuses the sibling git worktree MAIN-SUFFIX on the branch SUFFIX and prints its absolute path.',
         '',
         `  --suffix SUFFIX  1 to ${String(MAX_SUFFIX)} characters: a-z or 0-9 first, then a-z, 0-9, ".", "_" or "-"`,
         "  --parent DIR     folder for the worktree (default: the main clone's parent folder);",
         '                   a leading ~ or ~/ is expanded to the home folder, other ~ forms are refused',
+        '  --no-install     skip the dependency installs; dependency folders are cloned or linked instead',
         '  --help           show this help',
         '',
         'Exit codes: 0 success (the path on stdout), 1 refusal or error, 2 wrong arguments.',

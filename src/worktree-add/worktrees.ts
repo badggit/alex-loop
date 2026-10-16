@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { canonicalLoose, lstatOrUndefined } from './paths.ts';
+import { canonicalLoose, errorCode, lstatOrUndefined } from './paths.ts';
 import type { Deps, WorktreeEntry } from './types.ts';
 
 export type LockState = 'locked' | 'unlocked' | 'unknown';
@@ -9,10 +9,6 @@ export type LockState = 'locked' | 'unlocked' | 'unknown';
 const BRANCH_LINE_PREFIX = 'branch refs/heads/';
 
 const GITDIR_LINE = /^gitdir: (.+?)\r?\n?$/u;
-
-function errorCode(error: unknown): unknown {
-    return error instanceof Error && 'code' in error ? error.code : undefined;
-}
 
 function hasFlag(line: string, flag: string): boolean {
     return line === flag || line.startsWith(`${flag} `);

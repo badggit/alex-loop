@@ -40,6 +40,7 @@ const IGNORE_RULES = [
     '*.tsbuildinfo',
     '.claude/',
     '.venv/',
+    'venv/',
     'config/',
     '',
 ].join('\n');
@@ -53,9 +54,13 @@ const IGNORED_FILES = [
     'x.tsbuildinfo',
     '.claude/settings.local.json',
     '.venv/bin/python',
+    'venv/bin/python',
+    '.venv/pyvenv.cfg',
+    'venv/pyvenv.cfg',
     'config/.env',
 ];
 const COPY_RELS = ['.env', 'CLAUDE.local.md', 'apps/web/.env.local', 'temp.local'];
+const DEP_RELS = ['.venv', 'node_modules', 'venv'];
 const DEAD_PID = 999_999_999;
 const UNAVAILABLE_GATE: CloneGate = {
     check: () => Promise.resolve({ kind: 'unavailable', reason: 'no copy-on-write here' }),
@@ -86,10 +91,12 @@ function makeFixture(t: TestContext, wrap: Wrap): Fixture {
     return { env, main, worktree, deps, exclude: path.join(main, '.git', 'info', 'exclude') };
 }
 
-async function sync(fixture: Fixture): Promise<void> {
+async function sync(fixture: Fixture): Promise<string[]> {
     const { deps, main, worktree } = fixture;
     const transfer = createTransfer(deps, { main, worktree, gate: createCloneGate() });
-    await syncIgnored(deps, main, worktree, transfer);
+    const depRels = await syncIgnored(deps, main, worktree, transfer);
+    assert.ok(depRels, 'the ignored files of the main clone could not be listed');
+    return depRels;
 }
 
 function messages(lines: readonly string[]): string[] {
@@ -177,8 +184,17 @@ function lineCount(file: string, line: string): number {
 
 function assertCleanStatus(fixture: Fixture): void {
     assert.equal(gitSync(fixture.env, ['-C', fixture.worktree, 'status', '--porcelain']), '');
-    for (const line of ['/node_modules', '/docs.local', TEMP_PATTERN, EXCLUDE_HEADER]) {
+    for (const line of ['/docs.local', TEMP_PATTERN, EXCLUDE_HEADER]) {
         assert.equal(lineCount(fixture.exclude, line), 1, line);
+    }
+}
+
+// The sync leaves dependency folders to the install stage: none stands in the worktree and none gets a pattern.
+function assertDepsLeftToStage(fixture: Fixture, depRels: readonly string[]): void {
+    assert.deepEqual(depRels.toSorted(), DEP_RELS);
+    for (const rel of DEP_RELS) {
+        assert.equal(fs.lstatSync(path.join(fixture.worktree, rel), { throwIfNoEntry: false }), undefined, rel);
+        assert.equal(lineCount(fixture.exclude, `/${rel}`), 0, rel);
     }
 }
 
@@ -217,15 +233,15 @@ function failFirstClone(inner: CommandRunner, source: string, failed: CommandReq
     };
 }
 
-await test('without copy-on-write the copies are plain and node_modules is linked', async (t) => {
+await test('without copy-on-write the copies are plain and dependency folders are left to the stage', async (t) => {
     const fixture = makeFixture(t, withoutCow);
-    await sync(fixture);
-    const { main, worktree, deps } = fixture;
+    const depRels = await sync(fixture);
+    const { deps } = fixture;
     assertCopies(fixture);
-    assert.equal(linkText(path.join(worktree, 'node_modules')), path.join(main, 'node_modules'));
+    assertDepsLeftToStage(fixture, depRels);
     assert.equal(
-        messages(deps.lines).includes('info linked node_modules: no copy-on-write between the clone and the worktree'),
-        true
+        messages(deps.lines).some((line) => line.includes('node_modules')),
+        false
     );
     const methods = copyMethods(deps.lines);
     assert.deepEqual([...methods.keys()].toSorted(), COPY_RELS.toSorted());
@@ -233,22 +249,15 @@ await test('without copy-on-write the copies are plain and node_modules is linke
     assertCleanStatus(fixture);
 });
 
-await test('with copy-on-write the copies are clones and node_modules is a cloned folder', async (t) => {
+await test('with copy-on-write the copies are clones and dependency folders are left to the stage', async (t) => {
     const fixture = makeFixture(t, withCowEmulation);
-    await sync(fixture);
-    const { worktree, deps } = fixture;
+    const depRels = await sync(fixture);
+    const { deps } = fixture;
     assertCopies(fixture);
-    const modules = fs.lstatSync(path.join(worktree, 'node_modules'));
-    assert.equal(modules.isDirectory(), true);
+    assertDepsLeftToStage(fixture, depRels);
     assert.equal(
-        fs.readFileSync(path.join(worktree, 'node_modules', 'pkg', 'index.js'), 'utf8'),
-        'node_modules/pkg/index.js\n'
-    );
-    const shown = messages(deps.lines);
-    assert.equal(shown.includes('info cloning node_modules into the worktree with copy-on-write'), true);
-    assert.equal(
-        shown.some((line) => /^info cloned node_modules into the worktree in \d+\.\d s$/u.test(line)),
-        true
+        messages(deps.lines).some((line) => line.includes('node_modules')),
+        false
     );
     const methods = copyMethods(deps.lines);
     assert.deepEqual([...methods.keys()].toSorted(), COPY_RELS.toSorted());
@@ -265,12 +274,10 @@ await test('nested entries land at exactly their own paths', async (t) => {
         [
             '.claude',
             '.env',
-            '.venv',
             'apps/web/.env.local',
             'CLAUDE.local.md',
             'config',
             'docs.local',
-            'node_modules',
             'temp.local',
             'temp.local/link',
             'temp.local/notes',
@@ -311,16 +318,6 @@ await test('an own link at .env becomes a copy and a dead temp next to it is swe
     assert.deepEqual(tempsUnder(worktree), []);
 });
 
-await test('an own node_modules link becomes a clone with copy-on-write', async (t) => {
-    const fixture = makeFixture(t, withCowEmulation);
-    const { main, worktree } = fixture;
-    fs.symlinkSync(path.join(main, 'node_modules'), path.join(worktree, 'node_modules'));
-    await sync(fixture);
-    assert.equal(fs.lstatSync(path.join(worktree, 'node_modules')).isDirectory(), true);
-    assert.equal(isFile(path.join(worktree, 'node_modules', 'pkg', 'index.js')), true);
-    assertCleanStatus(fixture);
-});
-
 await test('a failing copy warns, leaves nothing behind and the rest still syncs', async (t) => {
     const fixture = makeFixture(t, (inner, main) =>
         withOverride(
@@ -340,7 +337,7 @@ await test('a failing copy warns, leaves nothing behind and the rest still syncs
     const methods = copyMethods(deps.lines);
     assert.deepEqual([...methods.keys()].toSorted(), ['.env', 'CLAUDE.local.md', 'apps/web/.env.local']);
     assert.equal(linkText(path.join(worktree, 'docs.local')), path.join(main, 'docs.local'));
-    assert.equal(linkText(path.join(worktree, 'node_modules')), path.join(main, 'node_modules'));
+    assert.equal(fs.lstatSync(path.join(worktree, 'node_modules'), { throwIfNoEntry: false }), undefined);
 });
 
 await test('a failed clone of a copy entry is retried once as a plain copy', async (t) => {

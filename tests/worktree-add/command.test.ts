@@ -3,14 +3,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test, type TestContext } from 'node:test';
 
-import { runWorktreeAdd } from '../../src/worktree-add/command.ts';
+import { runWorktreeAdd, type CommandIo } from '../../src/worktree-add/command.ts';
+import { SANDBOX_NETWORK_VARIABLE } from '../../src/worktree-add/installStage.ts';
 import { createProcessRunner } from '../../src/worktree-add/proc.ts';
-import type { CloneGate, Deps, Env, Outcome } from '../../src/worktree-add/types.ts';
+import type { CloneGate, CommandRequest, CommandRunner, Deps, Env, Outcome } from '../../src/worktree-add/types.ts';
 
 import { testDeps } from './support/deps.ts';
 import { commitFile, gitSync, makeRepo, testEnv } from './support/git.ts';
-import { withOverride, withoutCow } from './support/runners.ts';
+import { recording, withOverride, withoutCow } from './support/runners.ts';
+import { isolatedBin, withPath } from './support/stubManagers.ts';
 import { tempRoot } from './support/tmp.ts';
+import { writeStubTool } from './support/tools.ts';
 
 interface Fixture {
     root: string;
@@ -24,6 +27,8 @@ const IGNORE_RULES = '.env\ndocs.local/\n';
 const BROKEN_GATE: CloneGate = {
     check: () => Promise.reject(new Error('gate broke')),
 };
+const NPM_LOCK = '{"lockfileVersion":3}\n';
+const NPM_STUB = 'case "$1" in --version) echo 10.9.0; exit 0;; esac\nmkdir -p node_modules/from-stub\nexit 0';
 
 // A main clone app on a feature branch with an ignored .env (a copy) and docs.local (a link); no-CoW is forced.
 function makeFixture(t: TestContext): Fixture {
@@ -39,6 +44,29 @@ function makeFixture(t: TestContext): Fixture {
     fs.writeFileSync(path.join(main, 'docs.local', 'a.md'), 'doc\n');
     const deps = testDeps(env, { runner: withoutCow(createProcessRunner(env)) });
     return { root, env, main, origin, deps };
+}
+
+// A main clone app with a tracked npm project, its node_modules ignored and present, and a stub npm on an isolated
+// PATH that makes node_modules/from-stub; cloning is forced to fail, so a fallback node_modules is an own link.
+function makeInstallFixture(t: TestContext): Fixture {
+    const root = tempRoot(t);
+    const bin = isolatedBin(root);
+    writeStubTool(bin, 'npm', NPM_STUB);
+    const env: Env = { ...withPath(testEnv(root), bin), [SANDBOX_NETWORK_VARIABLE]: undefined };
+    const { main, origin } = makeRepo(root, env);
+    commitFile(env, main, '.gitignore', 'node_modules/\n');
+    commitFile(env, main, 'package.json', '{"name":"demo"}\n');
+    commitFile(env, main, 'package-lock.json', NPM_LOCK);
+    gitSync(env, ['-C', main, 'push', '--quiet', 'origin', 'main']);
+    fs.mkdirSync(path.join(main, 'node_modules', 'pkg'), { recursive: true });
+    fs.writeFileSync(path.join(main, 'node_modules', 'pkg', 'index.js'), 'pkg\n');
+    const runner = withoutCow(createProcessRunner(env));
+    t.after(() => runner.terminateAll());
+    return { root, env, main, origin, deps: testDeps(env, { runner }) };
+}
+
+function runWith(f: Fixture, argv: readonly string[], extra: Partial<CommandIo>): Promise<Outcome> {
+    return runWorktreeAdd({ deps: f.deps, env: f.env, cwd: f.main, ...extra }, argv);
 }
 
 function run(f: Fixture, argv: readonly string[], cwd = f.main, gate?: CloneGate): Promise<Outcome> {
@@ -76,6 +104,25 @@ function branchExists(f: Fixture, branch: string): boolean {
 
 function tipOf(f: Fixture, ref: string): string {
     return gitSync(f.env, ['-C', f.main, 'rev-parse', ref]).trim();
+}
+
+// The first request that matches is rejected with MESSAGE without running; the rest go to inner.
+function rejectingFirst(
+    inner: CommandRunner,
+    match: (_request: CommandRequest) => boolean,
+    message: string
+): CommandRunner {
+    let rejected = false;
+    return {
+        run: (request) => {
+            if (!rejected && match(request)) {
+                rejected = true;
+                return Promise.reject(new Error(message));
+            }
+            return inner.run(request);
+        },
+        terminateAll: () => inner.terminateAll(),
+    };
 }
 
 await test('a new worktree is created next to the main clone on a branch from main', async (t) => {
@@ -205,4 +252,129 @@ await test('usage and help outcomes come from the arguments', async (t) => {
     assert.equal(missing.kind, 'usage');
     const fileParent = await run(f, ['--suffix', 'rep-9', '--parent', path.join(f.main, '.gitignore')]);
     assert.equal(fileParent.kind, 'usage');
+});
+
+await test('a tracked npm lock file installs node_modules in the worktree with the stub npm', async (t) => {
+    const f = makeInstallFixture(t);
+    const target = okPath(await runWith(f, ['--suffix', 'inst-1'], {}));
+    const modules = path.join(target, 'node_modules');
+    assert.ok(fs.lstatSync(modules).isDirectory(), f.deps.lines.join('\n'));
+    assert.deepEqual(fs.readdirSync(modules), ['from-stub']);
+    assert.deepEqual(fs.readdirSync(path.join(f.main, 'node_modules')), ['pkg']);
+    assert.equal(fs.readFileSync(path.join(f.main, 'node_modules', 'pkg', 'index.js'), 'utf8'), 'pkg\n');
+});
+
+await test('--no-install leaves node_modules in the worktree as an own link', async (t) => {
+    const f = makeInstallFixture(t);
+    const target = okPath(await runWith(f, ['--suffix', 'inst-2', '--no-install'], {}));
+    const modules = path.join(target, 'node_modules');
+    assert.ok(fs.lstatSync(modules).isSymbolicLink(), f.deps.lines.join('\n'));
+    assert.equal(fs.readlinkSync(modules), path.join(f.main, 'node_modules'));
+    assert.ok(logged(f, 'info installs skipped (--no-install): linked node_modules'));
+});
+
+await test('an install stage that throws is only a warning', async (t) => {
+    const f = makeInstallFixture(t);
+    const nowMs = (): number => {
+        throw new Error('clock broke');
+    };
+    const target = path.join(f.root, 'app-inst-3');
+    assert.equal(okPath(await runWith(f, ['--suffix', 'inst-3'], { nowMs })), target);
+    assert.ok(logged(f, 'warn cannot install dependencies: clock broke'), f.deps.lines.join('\n'));
+});
+
+await test('a thrown value that cannot become text is an unknown install warning', async (t) => {
+    const f = makeInstallFixture(t);
+    const nowMs = (): number => {
+        throw Object.create(null);
+    };
+    const target = path.join(f.root, 'app-inst-4');
+    assert.equal(okPath(await runWith(f, ['--suffix', 'inst-4'], { nowMs })), target);
+    assert.ok(logged(f, 'warn cannot install dependencies: unknown error'), f.deps.lines.join('\n'));
+});
+
+function warnLines(f: Fixture): string[] {
+    return f.deps.lines.filter((line) => line.includes(' warn '));
+}
+
+await test('a failing ignored-files listing still installs from lock files with one warning', async (t) => {
+    const f = makeInstallFixture(t);
+    const failed = { code: 128, stdout: '', stderr: 'fatal: broken' };
+    const isIgnoredListing = (request: CommandRequest): boolean =>
+        request.args.includes('ls-files') && request.args.includes('--ignored');
+    const runner = recording(withOverride(f.deps.runner, isIgnoredListing, failed));
+    f.deps.runner = runner;
+    const warning = 'warn cannot list the ignored files of ';
+    const installed = okPath(await runWith(f, ['--suffix', 'inst-5'], {}));
+    let all = f.deps.lines.join('\n');
+    assert.deepEqual(fs.readdirSync(path.join(installed, 'node_modules')), ['from-stub'], all);
+    assert.equal(warnLines(f).length, 1, all);
+    assert.ok(warnLines(f)[0]?.includes(warning), all);
+    assert.equal(logged(f, 'cannot install dependencies'), false, all);
+    assert.equal(runner.calls.filter((request) => path.basename(request.file) === 'npm').length, 2, all);
+
+    f.deps.lines.length = 0;
+    const skipped = okPath(await runWith(f, ['--suffix', 'inst-6', '--no-install'], {}));
+    all = f.deps.lines.join('\n');
+    assert.equal(fs.lstatSync(path.join(skipped, 'node_modules'), { throwIfNoEntry: false }), undefined);
+    assert.equal(warnLines(f).length, 1, all);
+    assert.ok(warnLines(f)[0]?.includes(warning), all);
+    assert.equal(logged(f, 'installs skipped'), false, all);
+    assert.equal(runner.calls.filter((request) => path.basename(request.file) === 'npm').length, 2, all);
+});
+
+await test('an undefined timing value keeps its default', async (t) => {
+    const f = makeInstallFixture(t);
+    const timing = { phaseMs: undefined, progressMs: undefined, networkTimeoutMs: undefined };
+    const target = okPath(await runWith(f, ['--suffix', 'inst-7'], { timing }));
+    assert.deepEqual(fs.readdirSync(path.join(target, 'node_modules')), ['from-stub'], f.deps.lines.join('\n'));
+});
+
+await test('a sync that throws still installs from lock files and warns once with the thrown message', async (t) => {
+    const f = makeInstallFixture(t);
+    const runner = recording(
+        rejectingFirst(f.deps.runner, (request) => request.args.includes('--ignored'), 'listing broke')
+    );
+    f.deps.runner = runner;
+    const target = okPath(await runWith(f, ['--suffix', 'inst-8'], {}));
+    assert.equal(target, path.join(f.root, 'app-inst-8'));
+    const all = f.deps.lines.join('\n');
+    assert.deepEqual(warnLines(f).length, 1, all);
+    assert.ok(
+        warnLines(f)[0]?.endsWith(
+            'warn cannot sync ignored paths into the worktree: listing broke; ' +
+                'the dependency fallback from the main clone is skipped and nested projects are not installed automatically'
+        ),
+        all
+    );
+    assert.equal(logged(f, 'cannot install dependencies'), false, all);
+    assert.ok(logged(f, 'info installed dependencies with npm in '), all);
+    const modules = fs.lstatSync(path.join(target, 'node_modules'));
+    assert.ok(modules.isDirectory() && !modules.isSymbolicLink(), all);
+    assert.equal(runner.calls.filter((request) => path.basename(request.file) === 'npm').length, 2, all);
+});
+
+// Each applied step that is not a new branch from main (reused, existing local, tracked remote) still installs.
+await test('the install stage runs for a reused, an existing and a tracked worktree', async (t) => {
+    const f = makeInstallFixture(t);
+    const reused = okPath(await runWith(f, ['--suffix', 'inst-9'], {}));
+    fs.rmSync(path.join(reused, 'node_modules'), { recursive: true, force: true });
+    gitSync(f.env, ['-C', f.main, 'branch', 'inst-10', 'main']);
+    gitSync(f.env, ['-C', f.main, 'push', '--quiet', 'origin', 'main:refs/heads/inst-11']);
+    gitSync(f.env, ['-C', f.main, 'fetch', '--quiet', 'origin']);
+    const cases = [
+        { suffix: 'inst-9', line: `info reusing worktree ${reused}` },
+        { suffix: 'inst-10', line: 'info checking out EXISTING local branch inst-10' },
+        { suffix: 'inst-11', line: 'tracking origin/inst-11' },
+    ];
+    for (const { suffix, line } of cases) {
+        f.deps.lines.length = 0;
+        const target = okPath(await runWith(f, ['--suffix', suffix], {}));
+        const all = f.deps.lines.join('\n');
+        assert.ok(logged(f, line), all);
+        assert.ok(logged(f, 'info installed dependencies with npm in '), all);
+        const modules = fs.lstatSync(path.join(target, 'node_modules'));
+        assert.ok(modules.isDirectory() && !modules.isSymbolicLink(), all);
+        assert.deepEqual(fs.readdirSync(path.join(target, 'node_modules')), ['from-stub']);
+    }
 });

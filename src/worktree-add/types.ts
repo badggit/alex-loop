@@ -4,6 +4,9 @@ export interface CommandRequest {
     file: string;
     args: readonly string[];
     cwd?: string;
+    // String values add to or override the runner env for this child only; an undefined value removes that name for this child.
+    env?: Env;
+    timeoutMs?: number;
 }
 
 // code is 128+N when the child was killed by signal N and 127 when spawning failed.
@@ -12,7 +15,11 @@ export interface CommandResult {
     stdout: string;
     stderr: string;
     spawnError?: string;
+    // True only when the request's timeoutMs fired.
+    timedOut?: boolean;
 }
+
+export type ManagerName = 'npm' | 'pnpm' | 'yarn-classic' | 'yarn-berry' | 'bun' | 'uv';
 
 export interface CommandRunner {
     run(_request: CommandRequest): Promise<CommandResult>;
