@@ -3,7 +3,7 @@
   "version": "1.14.0",
   "description": "Design-to-implementation skill chain for Codex: feature-design, then feature-plan, then feature-implement, with an adversarial feature-challenge pass and a feature-panel multi-agent verifier. A feature-fix fast path handles scoped changes (bugs, chores, tweaks) with a known end-state, no design phase. Opt-in autonomous mode self-drives the chain after design approval, panel-gated to a unanimous bar. Bundles the feature-git-branch and feature-git-commit helpers plus session-injected workflow rules. A feature-config interview reviews and writes the repo-level directives (autonomous mode, commit policy, external models). A context-watchdog skill keeps working state across auto-compaction: a checkpoint is saved before it and restored after it. A worktree-add skill creates a sibling git worktree for parallel work, with per-worktree copies of the .env files and local notes and links for other ignored files; it needs Node 22+.",
   "author": {
-    "name": "suxxes and badggit"
+    "name": "badggit"
   },
   "keywords": [
     "feature-design",
@@ -23,7 +23,7 @@
     "displayName": "Alex Loop",
     "shortDescription": "Design-to-implementation skill chain with an adversarial challenge pass and a multi-agent verifier.",
     "longDescription": "Packages the feature-design, feature-plan, and feature-implement backbone plus the feature-challenge adversarial pass and the feature-panel multi-agent verifier that gates each phase. Opt-in autonomous mode self-drives the chain after design approval, panel-gated to a unanimous bar. Bundles feature-git-branch and feature-git-commit. A feature-config interview reviews and writes the repo-level directives.",
-    "developerName": "suxxes and badggit",
+    "developerName": "badggit",
     "category": "Productivity",
     "capabilities": [
       "Read",
