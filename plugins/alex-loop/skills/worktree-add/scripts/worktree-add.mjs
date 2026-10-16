@@ -250,6 +250,12 @@ function canonical(file) {
     return file;
   }
 }
+function errorCode(error) {
+  if (error instanceof Error && "code" in error && typeof error.code === "string") {
+    return error.code;
+  }
+  return "unknown";
+}
 function lstatOrUndefined(file) {
   try {
     return fs2.lstatSync(file);
@@ -298,6 +304,9 @@ function isLinkWithText(file, text) {
     return false;
   }
 }
+function isOwnLink(paths, rel) {
+  return isLinkWithText(path.join(paths.worktree, rel), path.join(paths.main, rel));
+}
 function realOrUndefined(file) {
   try {
     return fs2.realpathSync.native(file);
@@ -319,7 +328,7 @@ var init_paths = __esm({
 // src/worktree-add/place.ts
 import fs3 from "node:fs";
 import path2 from "node:path";
-function errorCode(error) {
+function errorCode2(error) {
   return error instanceof Error && "code" in error && typeof error.code === "string" ? error.code : "unknown";
 }
 function removeQuietly(file) {
@@ -420,7 +429,7 @@ function moveIntoPlace(temp, request, rename) {
     if (replacesOwnLink) {
       restoreOwnLink(dest, ownLinkText);
     }
-    return { ok: false, reason: `cannot rename the copy into place (${errorCode(error)})` };
+    return { ok: false, reason: `cannot rename the copy into place (${errorCode2(error)})` };
   }
 }
 async function placeCopy(deps, request, rename = fs3.renameSync) {
@@ -630,7 +639,7 @@ var init_cowGate = __esm({
 // src/worktree-add/worktrees.ts
 import fs5 from "node:fs";
 import path4 from "node:path";
-function errorCode2(error) {
+function errorCode3(error) {
   return error instanceof Error && "code" in error ? error.code : void 0;
 }
 function hasFlag(line, flag) {
@@ -692,7 +701,7 @@ function lockMarkerState(adminDir) {
     fs5.lstatSync(path4.join(adminDir, "locked"));
     return "locked";
   } catch (error) {
-    return errorCode2(error) === "ENOENT" ? "unlocked" : "unknown";
+    return errorCode3(error) === "ENOENT" ? "unlocked" : "unknown";
   }
 }
 function lockStateOfFolder(worktreePath, commonDir, isMain) {
@@ -1029,7 +1038,7 @@ var init_decide = __esm({
 // src/worktree-add/facts.ts
 import fs7 from "node:fs";
 import path6 from "node:path";
-function errorCode3(error) {
+function errorCode4(error) {
   return error instanceof Error && "code" in error ? error.code : void 0;
 }
 function git2(deps, dir, args) {
@@ -1049,7 +1058,7 @@ function targetStateOf(target) {
   try {
     return fs7.lstatSync(target).isSymbolicLink() ? "symlink" : "present";
   } catch (error) {
-    return errorCode3(error) === "ENOENT" ? "absent" : "unreadable";
+    return errorCode4(error) === "ENOENT" ? "absent" : "unreadable";
   }
 }
 function findRegistered(entries, target) {
@@ -1399,7 +1408,7 @@ function anchoredPattern(rel) {
   const escaped = rel.replaceAll(GLOB_CHARACTERS, String.raw`\$&`);
   return `/${escaped.endsWith(" ") ? `${escaped.slice(0, -1)}${String.raw`\ `}` : escaped}`;
 }
-function errorCode4(error) {
+function errorCode5(error) {
   if (error instanceof Error && "code" in error && typeof error.code === "string") {
     return error.code;
   }
@@ -1409,7 +1418,7 @@ function readExisting(file) {
   try {
     return { ok: true, text: fs8.readFileSync(file, "utf8") };
   } catch (error) {
-    return errorCode4(error) === "ENOENT" ? { ok: true, text: "" } : { ok: false };
+    return errorCode5(error) === "ENOENT" ? { ok: true, text: "" } : { ok: false };
   }
 }
 async function excludeFilePath(deps, worktree) {
@@ -1483,12 +1492,6 @@ function classify(rel) {
   }
   return "link";
 }
-function errorCode5(error) {
-  if (error instanceof Error && "code" in error && typeof error.code === "string") {
-    return error.code;
-  }
-  return "unknown";
-}
 async function listIgnored(deps, main2) {
   const listed = await deps.runner.run({
     file: "git",
@@ -1512,9 +1515,6 @@ function usableEntries(deps, rels) {
   }
   return kept;
 }
-function isOwnLink(run, rel) {
-  return isLinkWithText(path10.join(run.worktree, rel), path10.join(run.main, rel));
-}
 function destinationOpen(run, rel, kind) {
   if (lstatOrUndefined(path10.join(run.worktree, rel)) === void 0) {
     return true;
@@ -1530,7 +1530,7 @@ function linkMissing(run, rel) {
     fs9.symlinkSync(path10.join(run.main, rel), dest);
     return true;
   } catch (error) {
-    const code = errorCode5(error);
+    const code = errorCode(error);
     if (code !== "EEXIST") {
       run.deps.log.warn(`cannot link ${showText(rel)} into the worktree: ${showText(code)}`);
     }

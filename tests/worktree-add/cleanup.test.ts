@@ -85,7 +85,7 @@ await test('untrackedEntries lists untracked and ignored entries without a trail
     writeFile(path.join(fixture.worktree, 'notes.txt'), 'n\n');
     fs.mkdirSync(path.join(fixture.worktree, 'empty'));
     const entries = await untrackedEntries(fixture.deps, fixture.worktree);
-    assert.deepEqual([...(entries ?? [])].toSorted(), ['.gitignore', 'node_modules', 'notes.txt']);
+    assert.deepEqual([...(entries ?? [])].toSorted(), ['.gitignore', 'empty', 'node_modules', 'notes.txt']);
 });
 
 await test('untrackedEntries gives undefined outside a git checkout', async (t) => {
@@ -109,6 +109,41 @@ await test('removeNewEntries removes only entries absent from before', async (t)
     assert.equal(lstatOrUndefined(path.join(fixture.worktree, 'node_modules')), undefined);
     assert.equal(lstatOrUndefined(path.join(fixture.worktree, 'new.txt')), undefined);
     assert.equal(fs.readFileSync(path.join(fixture.worktree, 'README.md'), 'utf8'), 'app\n');
+});
+
+await test('removeNewEntries keeps an empty folder that stood before even when the install writes into it', async (t) => {
+    const fixture = makeFixture(t);
+    fs.mkdirSync(path.join(fixture.worktree, 'tmp'));
+    const before = await untrackedEntries(fixture.deps, fixture.worktree);
+    assert.ok(before?.has('tmp'));
+    writeFile(path.join(fixture.worktree, 'tmp', 'cache.bin'), 'cache\n');
+    const result = await removeNewEntries(fixture.deps, fixture.worktree, before ?? new Set());
+    assert.deepEqual(result, { ok: true });
+    assert.equal(fs.readFileSync(path.join(fixture.worktree, 'tmp', 'cache.bin'), 'utf8'), 'cache\n');
+});
+
+await test('removeNewEntries removes an empty folder the install created', async (t) => {
+    const fixture = makeFixture(t);
+    const before = await untrackedEntries(fixture.deps, fixture.worktree);
+    assert.notEqual(before, undefined);
+    fs.mkdirSync(path.join(fixture.worktree, 'node_modules', 'partial'), { recursive: true });
+    fs.mkdirSync(path.join(fixture.worktree, 'empty'));
+    const result = await removeNewEntries(fixture.deps, fixture.worktree, before ?? new Set());
+    assert.deepEqual(result, { ok: true });
+    assert.equal(lstatOrUndefined(path.join(fixture.worktree, 'node_modules')), undefined);
+    assert.equal(lstatOrUndefined(path.join(fixture.worktree, 'empty')), undefined);
+});
+
+await test('removeNewEntries reports a failed listing with the git reason and no leftovers', async (t) => {
+    const fixture = makeFixture(t);
+    writeFile(path.join(fixture.worktree, 'new.txt'), 'new\n');
+    const runner: CommandRunner = {
+        run: () => Promise.resolve({ code: 128, stdout: '', stderr: 'fatal: index file corrupt\nmore\n' }),
+        terminateAll: () => Promise.resolve(),
+    };
+    const result = await removeNewEntries({ ...fixture.deps, runner }, fixture.worktree, new Set());
+    assert.deepEqual(result, { ok: false, leftovers: [], reason: 'fatal: index file corrupt' });
+    assert.equal(fs.readFileSync(path.join(fixture.worktree, 'new.txt'), 'utf8'), 'new\n');
 });
 
 await test('removeNewEntries keeps going past a refusal and reports every leftover', async (t) => {

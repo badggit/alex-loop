@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { errorCode } from './paths.ts';
 import type { Deps } from './types.ts';
 
 export const PARTIAL_MARKER = 'alex-loop-partial-install';
@@ -10,13 +11,6 @@ const LOG_MODE = 0o600;
 const UNSAFE_NAME_CHARACTER = /[^\w.-]/gu;
 
 export type LogWriteResult = { ok: true; path: string } | { ok: false; reason: string };
-
-function errorCode(error: unknown): string {
-    if (error instanceof Error && 'code' in error && typeof error.code === 'string') {
-        return error.code;
-    }
-    return 'unknown';
-}
 
 // The worktree's own git folder (.git/worktrees/NAME for a linked worktree); undefined when git fails.
 export async function privateDir(deps: Deps, worktree: string): Promise<string | undefined> {

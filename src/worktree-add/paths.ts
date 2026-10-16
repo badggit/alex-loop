@@ -10,6 +10,14 @@ export function canonical(file: string): string {
     }
 }
 
+// The code of a Node system error (ENOENT, EEXIST, ...), or 'unknown' for anything else.
+export function errorCode(error: unknown): string {
+    if (error instanceof Error && 'code' in error && typeof error.code === 'string') {
+        return error.code;
+    }
+    return 'unknown';
+}
+
 export function lstatOrUndefined(file: string): fs.Stats | undefined {
     try {
         return fs.lstatSync(file);
@@ -64,6 +72,11 @@ export function isLinkWithText(file: string, text: string): boolean {
     } catch {
         return false;
     }
+}
+
+// The link this tool makes for REL: a symlink in the worktree whose text is the same path in the main clone.
+export function isOwnLink(paths: { main: string; worktree: string }, rel: string): boolean {
+    return isLinkWithText(path.join(paths.worktree, rel), path.join(paths.main, rel));
 }
 
 export function realOrUndefined(file: string): string | undefined {

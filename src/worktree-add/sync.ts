@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { addExcludePatterns, anchoredPattern, TEMP_PATTERN } from './exclude.ts';
-import { isLinkWithText, lstatOrUndefined, parentInside } from './paths.ts';
+import { errorCode, isOwnLink, lstatOrUndefined, parentInside } from './paths.ts';
 import { hasControlCharacter, showText } from './text.ts';
 import type { Deps, EntryTransfer } from './types.ts';
 
@@ -48,13 +48,6 @@ export function classify(rel: string): EntryClass {
     return 'link';
 }
 
-function errorCode(error: unknown): string {
-    if (error instanceof Error && 'code' in error && typeof error.code === 'string') {
-        return error.code;
-    }
-    return 'unknown';
-}
-
 // The topmost ignored entries of MAIN, relative and without a trailing slash; undefined when git fails.
 async function listIgnored(deps: Deps, main: string): Promise<string[] | undefined> {
     const listed = await deps.runner.run({
@@ -83,10 +76,6 @@ function usableEntries(deps: Deps, rels: readonly string[]): string[] {
         }
     }
     return kept;
-}
-
-function isOwnLink(run: SyncRun, rel: string): boolean {
-    return isLinkWithText(path.join(run.worktree, rel), path.join(run.main, rel));
 }
 
 // An own link may stand where a copy or a dependency belongs: the transfer replaces it with the real entry.

@@ -1,20 +1,16 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { lstatOrUndefined, parentInside } from './paths.ts';
+import { errorCode, lstatOrUndefined, parentInside } from './paths.ts';
 import { showText } from './text.ts';
-import type { Deps } from './types.ts';
+import type { CommandResult, Deps } from './types.ts';
 
 export type RemoveResult = { ok: true } | { ok: false; reason: string };
 
+// Empty leftovers on a failure mean the listing itself failed and nothing was removed.
 export type RemoveNewResult = { ok: true } | { ok: false; leftovers: string[]; reason: string };
 
-function errorCode(error: unknown): string {
-    if (error instanceof Error && 'code' in error && typeof error.code === 'string') {
-        return error.code;
-    }
-    return 'unknown';
-}
+type ListResult = { ok: true; entries: ReadonlySet<string> } | { ok: false; reason: string };
 
 // A trailing separator on a link to a folder makes fs act on the link target, so it never reaches fs.
 function withoutTrailingSeparators(file: string): string {
@@ -25,20 +21,34 @@ function withoutTrailingSeparators(file: string): string {
     return result;
 }
 
-// Untracked and ignored entries alike, relative to DIR and without a trailing slash; undefined when git fails.
-export async function untrackedEntries(deps: Deps, dir: string): Promise<ReadonlySet<string> | undefined> {
+function failureLine(result: CommandResult): string {
+    if (result.spawnError !== undefined) {
+        return result.spawnError;
+    }
+    const [first = ''] = result.stderr.trim().split('\n', 1);
+    return first.length > 0 ? first : `git exited with code ${String(result.code)}`;
+}
+
+// Empty folders are listed too, so one that stood before is kept and one the install left behind is removed.
+async function listUntracked(deps: Deps, dir: string): Promise<ListResult> {
     const listed = await deps.runner.run({
         file: 'git',
-        args: ['-C', dir, 'ls-files', '-z', '--others', '--directory', '--no-empty-directory'],
+        args: ['-C', dir, 'ls-files', '-z', '--others', '--directory'],
     });
     if (listed.code !== 0) {
-        return;
+        return { ok: false, reason: failureLine(listed) };
     }
     const entries = listed.stdout
         .split('\0')
         .map((entry) => withoutTrailingSeparators(entry))
         .filter((entry) => entry.length > 0);
-    return new Set(entries);
+    return { ok: true, entries: new Set(entries) };
+}
+
+// Untracked and ignored entries alike, relative to DIR and without a trailing slash; undefined when git fails.
+export async function untrackedEntries(deps: Deps, dir: string): Promise<ReadonlySet<string> | undefined> {
+    const listed = await listUntracked(deps, dir);
+    return listed.ok ? listed.entries : undefined;
 }
 
 function refusal(rel: string): string | undefined {
@@ -83,13 +93,13 @@ export function removeSafely(root: string, rel: string): RemoveResult {
 
 // Removes every entry of DIR that is untracked now and was not in before; continues past failures.
 export async function removeNewEntries(deps: Deps, dir: string, before: ReadonlySet<string>): Promise<RemoveNewResult> {
-    const now = await untrackedEntries(deps, dir);
-    if (now === undefined) {
-        return { ok: false, leftovers: [], reason: `cannot list the untracked entries of ${showText(dir)}` };
+    const now = await listUntracked(deps, dir);
+    if (!now.ok) {
+        return { ok: false, leftovers: [], reason: now.reason };
     }
     const leftovers: string[] = [];
     let firstReason: string | undefined;
-    for (const rel of now) {
+    for (const rel of now.entries) {
         if (before.has(rel)) {
             continue;
         }
@@ -105,7 +115,7 @@ export async function removeNewEntries(deps: Deps, dir: string, before: Readonly
     return { ok: false, leftovers, reason: firstReason };
 }
 
-function shellQuote(text: string): string {
+export function shellQuote(text: string): string {
     return `'${text.replaceAll("'", String.raw`'\''`)}'`;
 }
 
