@@ -173,8 +173,16 @@ function parseArgs(argv, home) {
     return { kind: "help" };
   }
   const values = {};
+  let install = true;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index] ?? "";
+    if (arg === NO_INSTALL) {
+      if (!install) {
+        return usage(`${NO_INSTALL} can be given only once`);
+      }
+      install = false;
+      continue;
+    }
     if (!isValueOption(arg)) {
       return usage(
         arg.startsWith("-") ? `unknown option: ${showText(arg)}` : `unexpected argument: ${showText(arg)}`
@@ -200,31 +208,33 @@ function parseArgs(argv, home) {
   }
   const parentValue = values["--parent"];
   if (parentValue === void 0) {
-    return { kind: "ok", suffix, parent: void 0 };
+    return { kind: "ok", suffix, parent: void 0, install };
   }
   const expanded = expandParent(parentValue, home);
-  return expanded.ok ? { kind: "ok", suffix, parent: expanded.parent } : usage(expanded.message);
+  return expanded.ok ? { kind: "ok", suffix, parent: expanded.parent, install } : usage(expanded.message);
 }
 function usageText() {
   return [
-    "Usage: worktree-add.mjs --suffix SUFFIX [--parent DIR]",
+    "Usage: worktree-add.mjs --suffix SUFFIX [--parent DIR] [--no-install]",
     "",
     "Creates or reuses the sibling git worktree MAIN-SUFFIX on the branch SUFFIX and prints its absolute path.",
     "",
     `  --suffix SUFFIX  1 to ${String(MAX_SUFFIX)} characters: a-z or 0-9 first, then a-z, 0-9, ".", "_" or "-"`,
     "  --parent DIR     folder for the worktree (default: the main clone's parent folder);",
     "                   a leading ~ or ~/ is expanded to the home folder, other ~ forms are refused",
+    "  --no-install     skip the dependency installs; dependency folders are cloned or linked instead",
     "  --help           show this help",
     "",
     "Exit codes: 0 success (the path on stdout), 1 refusal or error, 2 wrong arguments.",
     ""
   ].join("\n");
 }
-var MAX_SUFFIX, SUFFIX_PATTERN;
+var NO_INSTALL, MAX_SUFFIX, SUFFIX_PATTERN;
 var init_args = __esm({
   "src/worktree-add/args.ts"() {
     "use strict";
     init_text();
+    NO_INSTALL = "--no-install";
     MAX_SUFFIX = 100;
     SUFFIX_PATTERN = /^[a-z0-9][a-z0-9._-]*$/u;
   }
@@ -1685,11 +1695,13 @@ function errorCode6(error) {
   }
   return;
 }
-function childEnv(env) {
+function childEnv(...layers) {
   const result = {};
-  for (const [name, value] of Object.entries(env)) {
-    if (value !== void 0) {
-      result[name] = value;
+  for (const layer of layers) {
+    for (const [name, value] of Object.entries(layer ?? {})) {
+      if (value !== void 0) {
+        result[name] = value;
+      }
     }
   }
   return result;
@@ -1728,7 +1740,7 @@ function trySpawn(request, env) {
   try {
     const child = spawn(request.file, [...request.args], {
       cwd: request.cwd,
-      env: childEnv(env),
+      env: childEnv(env, request.env),
       stdio: ["ignore", "pipe", "pipe"],
       detached: true
     });
@@ -1740,7 +1752,7 @@ function trySpawn(request, env) {
 function ignoreResult() {
   return;
 }
-function superviseChild(child) {
+function superviseChild(child, timeoutMs) {
   let resolveResult = ignoreResult;
   const result = new Promise((resolve) => {
     resolveResult = resolve;
@@ -1750,6 +1762,7 @@ function superviseChild(child) {
   const timers = [];
   let settled = false;
   let cancelled = false;
+  let timedOut = false;
   let killStepDone = false;
   let exitCode;
   let closeCode;
@@ -1761,7 +1774,7 @@ function superviseChild(child) {
     for (const timer of timers) {
       clearTimeout(timer);
     }
-    resolveResult(value);
+    resolveResult(timedOut ? { ...value, timedOut: true } : value);
   };
   const finishWhenQuiet = () => {
     if (closeCode !== void 0 && (killStepDone || !groupHasMembers(pid))) {
@@ -1796,6 +1809,19 @@ function superviseChild(child) {
     );
     poll();
   };
+  if (timeoutMs !== void 0) {
+    timers.push(
+      setTimeout(
+        () => {
+          if (!cancelled && !settled) {
+            timedOut = true;
+            cancel();
+          }
+        },
+        Math.min(timeoutMs, MAX_TIMER_MS)
+      )
+    );
+  }
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
   child.stdout.on("data", (chunk) => {
@@ -1825,7 +1851,7 @@ function runCommand(request, env, running) {
   if ("error" in attempt) {
     return Promise.resolve({ code: SPAWN_FAILED_CODE, stdout: "", stderr: "", spawnError: attempt.error });
   }
-  const supervised = superviseChild(attempt.child);
+  const supervised = superviseChild(attempt.child, request.timeoutMs);
   running.add(supervised);
   return supervised.result.finally(() => {
     running.delete(supervised);
@@ -1856,7 +1882,7 @@ function pidAlive(pid) {
     return errorCode6(error) === "EPERM";
   }
 }
-var SPAWN_FAILED_CODE, KILLED_CODE, KILL_GRACE_MS, GIVE_UP_MS, GROUP_POLL_MS;
+var SPAWN_FAILED_CODE, KILLED_CODE, KILL_GRACE_MS, GIVE_UP_MS, GROUP_POLL_MS, MAX_TIMER_MS;
 var init_proc = __esm({
   "src/worktree-add/proc.ts"() {
     "use strict";
@@ -1865,6 +1891,7 @@ var init_proc = __esm({
     KILL_GRACE_MS = 5e3;
     GIVE_UP_MS = 1e4;
     GROUP_POLL_MS = 50;
+    MAX_TIMER_MS = 2147483647;
   }
 });
 

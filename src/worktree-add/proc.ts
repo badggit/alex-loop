@@ -18,6 +18,8 @@ const KILLED_CODE = 137;
 const KILL_GRACE_MS = 5000;
 const GIVE_UP_MS = 10_000;
 const GROUP_POLL_MS = 50;
+// Node fires a timer after 1 ms when its delay is above this, so longer timeouts are clamped to it.
+const MAX_TIMER_MS = 2_147_483_647;
 
 function errorCode(error: unknown): string | undefined {
     if (error instanceof Error && 'code' in error && typeof error.code === 'string') {
@@ -26,11 +28,14 @@ function errorCode(error: unknown): string | undefined {
     return;
 }
 
-function childEnv(env: Env): Record<string, string> {
+// Later layers override earlier ones; an undefined value never removes a name set by an earlier layer.
+function childEnv(...layers: readonly (Env | undefined)[]): Record<string, string> {
     const result: Record<string, string> = {};
-    for (const [name, value] of Object.entries(env)) {
-        if (value !== undefined) {
-            result[name] = value;
+    for (const layer of layers) {
+        for (const [name, value] of Object.entries(layer ?? {})) {
+            if (value !== undefined) {
+                result[name] = value;
+            }
         }
     }
     return result;
@@ -74,7 +79,7 @@ function trySpawn(request: CommandRequest, env: Env): SpawnAttempt {
     try {
         const child = spawn(request.file, [...request.args], {
             cwd: request.cwd,
-            env: childEnv(env),
+            env: childEnv(env, request.env),
             stdio: ['ignore', 'pipe', 'pipe'],
             detached: true,
         });
@@ -90,8 +95,8 @@ function ignoreResult(): void {
 
 // cancel sends SIGTERM to the whole process group, SIGKILL after KILL_GRACE_MS while any member remains, and
 // gives up on the streams at GIVE_UP_MS, so a cancelled run always settles whatever a grandchild does with the
-// pipes. Without cancel there is no time limit.
-function superviseChild(child: SpawnedChild): Supervised {
+// pipes. A timeoutMs runs the same cancel path and marks the result timedOut; without either there is no time limit.
+function superviseChild(child: SpawnedChild, timeoutMs: number | undefined): Supervised {
     let resolveResult: (_result: CommandResult) => void = ignoreResult;
     const result = new Promise<CommandResult>((resolve) => {
         resolveResult = resolve;
@@ -101,6 +106,7 @@ function superviseChild(child: SpawnedChild): Supervised {
     const timers: NodeJS.Timeout[] = [];
     let settled = false;
     let cancelled = false;
+    let timedOut = false;
     let killStepDone = false;
     let exitCode: number | undefined;
     let closeCode: number | undefined;
@@ -113,7 +119,7 @@ function superviseChild(child: SpawnedChild): Supervised {
         for (const timer of timers) {
             clearTimeout(timer);
         }
-        resolveResult(value);
+        resolveResult(timedOut ? { ...value, timedOut: true } : value);
     };
     // A zombie left in the group would keep it non-empty, so after the kill step a closed child is enough.
     const finishWhenQuiet = (): void => {
@@ -150,6 +156,20 @@ function superviseChild(child: SpawnedChild): Supervised {
         poll();
     };
 
+    if (timeoutMs !== undefined) {
+        timers.push(
+            setTimeout(
+                () => {
+                    if (!cancelled && !settled) {
+                        timedOut = true;
+                        cancel();
+                    }
+                },
+                Math.min(timeoutMs, MAX_TIMER_MS)
+            )
+        );
+    }
+
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => {
@@ -181,7 +201,7 @@ function runCommand(request: CommandRequest, env: Env, running: Set<Supervised>)
     if ('error' in attempt) {
         return Promise.resolve({ code: SPAWN_FAILED_CODE, stdout: '', stderr: '', spawnError: attempt.error });
     }
-    const supervised = superviseChild(attempt.child);
+    const supervised = superviseChild(attempt.child, request.timeoutMs);
     running.add(supervised);
     return supervised.result.finally(() => {
         running.delete(supervised);
