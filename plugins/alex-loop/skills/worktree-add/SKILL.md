@@ -1,12 +1,12 @@
 ---
 name: worktree-add
-description: "Creates a sibling git worktree of the current project for parallel work, named after the current task, with per-worktree copies of the .env files, CLAUDE.local.md and temp.local, and moves the session into it. Invoked ONLY when the user runs /alex-loop:worktree-add, optionally with a parent folder. Do NOT self-trigger on generic requests like 'create a worktree'."
-argument-hint: "[FOLDER]"
+description: "Creates a sibling git worktree of the current project for parallel work, named after the current task, with per-worktree copies of the .env files, CLAUDE.local.md and temp.local and dependencies installed from the branch's own lock files, and moves the session into it. Invoked ONLY when the user runs /alex-loop:worktree-add, optionally with --no-install and a parent folder. Do NOT self-trigger on generic requests like 'create a worktree'."
+argument-hint: "[--no-install] [FOLDER]"
 disable-model-invocation: true
 allowed-tools: Bash(${CLAUDE_PLUGIN_ROOT}/skills/worktree-add/scripts/worktree-add.mjs *)
 ---
 
-<!-- Updated: 2026-10-14 -->
+<!-- Updated: 2026-10-16 -->
 
 # worktree-add
 
@@ -15,14 +15,16 @@ A thin wrapper around `scripts/worktree-add.mjs`, a Node script. The skill deriv
 What the script does (for answering questions; never repeat its work):
 
 - The folder is `MAINFOLDER-SUFFIX`, next to the main clone or inside the given parent folder. The script derives the name; the skill only passes the suffix.
-- `.env`, `.env.*`, `CLAUDE.local.md` and `temp.local` are copied per worktree. `node_modules` is cloned when copy-on-write is available, else linked. Build caches are skipped. Every other ignored entry (including `docs.local`, `.claude`, `.venv`) is linked to the main clone.
+- `.env`, `.env.*`, `CLAUDE.local.md` and `temp.local` are copied per worktree. Build caches are skipped. Every other ignored entry (including `docs.local` and `.claude`) is linked to the main clone.
+- Dependencies (`node_modules`, `.venv`, `venv` and any folder holding `pyvenv.cfg`) are installed per worktree from the branch's own lock files (npm, pnpm, yarn, bun, uv), not linked. A project is installed automatically when it sits at the worktree root or the main clone has its dependency folder; others get a `not installed automatically` line with the command.
+- Fallback: with `--no-install`, when the manager is not on PATH, or for a folder no supported lock file covers, `node_modules` is cloned with copy-on-write, else linked, and a Python environment is linked. When `CODEX_SANDBOX_NETWORK_DISABLED=1`, installs are skipped and the folders stay missing. A failed install is cleaned up and leaves the folder missing. A conflict between the lock files and `packageManager`, or a wrong manager version, gets no fallback either: the folders stay missing and the warning says why.
 - A new branch starts from the local default branch, not the current HEAD. Uncommitted changes are not carried over.
 
 Arguments: `$ARGUMENTS`
 
 ## 1. Read the arguments
 
-`$ARGUMENTS` is the optional parent folder DIR, taken as one value and passed exactly as typed. Empty means no `--parent`. Do not change a `~` in it: the script expands a leading `~` or `~/` itself. Do not check the folder yourself.
+When `$ARGUMENTS` starts with the word `--no-install`, remove it and pass `--no-install` to the script. `--no-install` counts only as the first word: if the user wrote it elsewhere (for example after the folder), move it to the front and pass it as the flag; never leave it inside DIR, or the script creates a folder with that name. The rest is the optional parent folder DIR, taken as one value and passed exactly as typed. Empty means no `--parent`. Do not change a `~` in it: the script expands a leading `~` or `~/` itself. Do not check the folder yourself.
 
 ## 2. Derive the suffix
 
@@ -42,6 +44,8 @@ Run the script exactly once, from the current project directory, as a single Bas
 ```
 ${CLAUDE_PLUGIN_ROOT}/skills/worktree-add/scripts/worktree-add.mjs --suffix 'SUFFIX'
 ${CLAUDE_PLUGIN_ROOT}/skills/worktree-add/scripts/worktree-add.mjs --suffix 'SUFFIX' --parent 'DIR'
+${CLAUDE_PLUGIN_ROOT}/skills/worktree-add/scripts/worktree-add.mjs --suffix 'SUFFIX' --no-install
+${CLAUDE_PLUGIN_ROOT}/skills/worktree-add/scripts/worktree-add.mjs --suffix 'SUFFIX' --parent 'DIR' --no-install
 ```
 
 - Write the script path UNQUOTED, exactly as above, so the command text matches the `allowed-tools` rule. This relies on the resolved plugin path holding no spaces or shell metacharacters, which holds for the plugin cache and the development folder.
@@ -60,6 +64,16 @@ login-form  ->  'login-form'
 ## 4. Relay the output
 
 Your reply starts with the script output exactly as printed: never capitalize, summarize, reword or translate it. Exit codes: 0 success, 1 refusal or error (one `error` log line), 2 usage error. On a non-zero exit, name the exit code and stop.
+
+When the output has install warnings (log lines whose text after the level starts with `cannot install dependencies`, `not installed:`, `not installed with`, `cannot remove the partial install`, `cannot clone`, `cannot link` or `to install:`), add after the verbatim output a short block in the user's language:
+
+- which project failed (the folder, or the worktree root) and why, in plain words;
+- what is missing (`... is left missing`, `stays missing`) or was linked instead;
+- the exact next step: the text of the `to install:` line, with its command, or the removal command the warning gives.
+
+An `info` line starting with `not installed automatically` is not a failure: that project was intentionally left out. Mention it in the same block (or alone) with the command shown in it (`run in the worktree: ...`).
+
+Whenever the output shows a dependency folder (`node_modules`, `.venv`, `venv` or a Python environment, at any depth) as linked, warnings or not (for example `installs skipped (--no-install): linked ...`, `linked ... meanwhile`, `linked it` or `linked it instead`), add that installs must not run in this worktree until the link itself is removed with `rm PATH` (no trailing slash; for example `rm node_modules`, `rm .venv`, `rm packages/a/node_modules`), because an install through the link writes into the main clone.
 
 Runtime: the script needs git and Node 22 or newer on PATH. When the command fails because `node` is missing (shell exit 127, or a `node: not found` or `No such file or directory` message), say that Node 22 or newer is required and stop. An older Node is reported by the script itself (`Node 22 or newer is required, found X`).
 
@@ -82,7 +96,7 @@ Write PATH single-quoted in the `cd` lines; a single quote inside PATH is writte
 
 ## 7. Closing line
 
-End the reply with this one line: inside the worktree, deleting a linked folder with a trailing slash (`rm -rf docs.local/`) erases the main clone's data; remove the link itself (`rm docs.local`) instead.
+End the reply with this one line: inside the worktree, deleting a linked folder with a trailing slash (`rm -rf docs.local/`, or `rm -rf node_modules/` when it was linked) erases the main clone's data; remove the link itself with `rm PATH`, no trailing slash (`rm docs.local`, `rm node_modules`, `rm .venv`) instead.
 
 ## Rules
 
