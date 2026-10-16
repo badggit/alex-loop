@@ -3926,10 +3926,12 @@ function messageOf(error) {
 }
 async function syncQuietly(deps, repo, target, transfer) {
   try {
-    return await syncIgnored(deps, repo.main, target.path, transfer);
+    const depRels = await syncIgnored(deps, repo.main, target.path, transfer);
+    return depRels === void 0 ? { ok: false, reason: "the ignored files of the main clone could not be listed" } : { ok: true, depRels };
   } catch (error) {
-    deps.log.warn(`cannot sync ignored paths into the worktree: ${messageOf(error)}`);
-    return void 0;
+    const message = messageOf(error);
+    deps.log.warn(`cannot sync ignored paths into the worktree: ${message}`);
+    return { ok: false, reason: message };
   }
 }
 function mergedTiming(timing) {
@@ -3954,9 +3956,9 @@ async function syncAndInstall(io, context) {
     worktree: target.path,
     gate: io.gate ?? createCloneGate()
   });
-  const depRels = await syncQuietly(deps, repo, target, transfer);
-  if (depRels === void 0) {
-    deps.log.warn("cannot install dependencies: the ignored files of the main clone could not be listed");
+  const synced = await syncQuietly(deps, repo, target, transfer);
+  if (!synced.ok) {
+    deps.log.warn(`cannot install dependencies: ${synced.reason}`);
     return;
   }
   await installQuietly({
@@ -3964,7 +3966,7 @@ async function syncAndInstall(io, context) {
     env: io.env,
     main: repo.main,
     worktree: target.path,
-    depRels,
+    depRels: synced.depRels,
     noInstall: context.noInstall,
     transfer,
     startedMs: context.startedMs,

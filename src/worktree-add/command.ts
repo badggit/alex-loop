@@ -90,19 +90,25 @@ function messageOf(error: unknown): string {
     }
 }
 
-// The worktree already exists here, so a sync that throws is only a warning; undefined means the dependency
-// folders of the main clone are unknown.
+type SyncResult = { ok: true; depRels: string[] } | { ok: false; reason: string };
+
+// The worktree already exists here, so a sync that throws is only a warning; a failed result carries why the
+// dependency folders of the main clone are unknown.
 async function syncQuietly(
     deps: Deps,
     repo: RepoLayout,
     target: WorktreeTarget,
     transfer: EntryTransfer
-): Promise<string[] | undefined> {
+): Promise<SyncResult> {
     try {
-        return await syncIgnored(deps, repo.main, target.path, transfer);
+        const depRels = await syncIgnored(deps, repo.main, target.path, transfer);
+        return depRels === undefined
+            ? { ok: false, reason: 'the ignored files of the main clone could not be listed' }
+            : { ok: true, depRels };
     } catch (error) {
-        deps.log.warn(`cannot sync ignored paths into the worktree: ${messageOf(error)}`);
-        return undefined;
+        const message = messageOf(error);
+        deps.log.warn(`cannot sync ignored paths into the worktree: ${message}`);
+        return { ok: false, reason: message };
     }
 }
 
@@ -135,9 +141,9 @@ async function syncAndInstall(
         worktree: target.path,
         gate: io.gate ?? createCloneGate(),
     });
-    const depRels = await syncQuietly(deps, repo, target, transfer);
-    if (depRels === undefined) {
-        deps.log.warn('cannot install dependencies: the ignored files of the main clone could not be listed');
+    const synced = await syncQuietly(deps, repo, target, transfer);
+    if (!synced.ok) {
+        deps.log.warn(`cannot install dependencies: ${synced.reason}`);
         return;
     }
     await installQuietly({
@@ -145,7 +151,7 @@ async function syncAndInstall(
         env: io.env,
         main: repo.main,
         worktree: target.path,
-        depRels,
+        depRels: synced.depRels,
         noInstall: context.noInstall,
         transfer,
         startedMs: context.startedMs,

@@ -6,7 +6,7 @@ import { test, type TestContext } from 'node:test';
 import { runWorktreeAdd, type CommandIo } from '../../src/worktree-add/command.ts';
 import { SANDBOX_NETWORK_VARIABLE } from '../../src/worktree-add/installStage.ts';
 import { createProcessRunner } from '../../src/worktree-add/proc.ts';
-import type { CloneGate, Deps, Env, Outcome } from '../../src/worktree-add/types.ts';
+import type { CloneGate, CommandRequest, CommandRunner, Deps, Env, Outcome } from '../../src/worktree-add/types.ts';
 
 import { testDeps } from './support/deps.ts';
 import { commitFile, gitSync, makeRepo, testEnv } from './support/git.ts';
@@ -104,6 +104,21 @@ function branchExists(f: Fixture, branch: string): boolean {
 
 function tipOf(f: Fixture, ref: string): string {
     return gitSync(f.env, ['-C', f.main, 'rev-parse', ref]).trim();
+}
+
+// The first request that matches is rejected with "exclude broke" without running; the rest go to inner.
+function rejectingFirst(inner: CommandRunner, match: (_request: CommandRequest) => boolean): CommandRunner {
+    let rejected = false;
+    return {
+        run: (request) => {
+            if (!rejected && match(request)) {
+                rejected = true;
+                return Promise.reject(new Error('exclude broke'));
+            }
+            return inner.run(request);
+        },
+        terminateAll: () => inner.terminateAll(),
+    };
 }
 
 await test('a new worktree is created next to the main clone on a branch from main', async (t) => {
@@ -300,4 +315,47 @@ await test('an undefined timing value keeps its default', async (t) => {
     const timing = { phaseMs: undefined, progressMs: undefined, networkTimeoutMs: undefined };
     const target = okPath(await runWith(f, ['--suffix', 'inst-7'], { timing }));
     assert.deepEqual(fs.readdirSync(path.join(target, 'node_modules')), ['from-stub'], f.deps.lines.join('\n'));
+});
+
+await test('a sync that throws skips the install stage and warns with the thrown message', async (t) => {
+    const f = makeInstallFixture(t);
+    const runner = recording(rejectingFirst(f.deps.runner, (request) => request.args.includes('info/exclude')));
+    f.deps.runner = runner;
+    const target = okPath(await runWith(f, ['--suffix', 'inst-8'], {}));
+    assert.equal(target, path.join(f.root, 'app-inst-8'));
+    const all = f.deps.lines.join('\n');
+    assert.ok(logged(f, 'warn cannot sync ignored paths into the worktree: exclude broke'), all);
+    const warnings = f.deps.lines.filter((line) => line.endsWith('warn cannot install dependencies: exclude broke'));
+    assert.equal(warnings.length, 1, all);
+    assert.equal(logged(f, 'could not be listed'), false, all);
+    assert.equal(logged(f, 'installed dependencies'), false, all);
+    assert.deepEqual(
+        runner.calls.filter((request) => path.basename(request.file) === 'npm'),
+        []
+    );
+});
+
+// Each applied step that is not a new branch from main (reused, existing local, tracked remote) still installs.
+await test('the install stage runs for a reused, an existing and a tracked worktree', async (t) => {
+    const f = makeInstallFixture(t);
+    const reused = okPath(await runWith(f, ['--suffix', 'inst-9'], {}));
+    fs.rmSync(path.join(reused, 'node_modules'), { recursive: true, force: true });
+    gitSync(f.env, ['-C', f.main, 'branch', 'inst-10', 'main']);
+    gitSync(f.env, ['-C', f.main, 'push', '--quiet', 'origin', 'main:refs/heads/inst-11']);
+    gitSync(f.env, ['-C', f.main, 'fetch', '--quiet', 'origin']);
+    const cases = [
+        { suffix: 'inst-9', line: `info reusing worktree ${reused}` },
+        { suffix: 'inst-10', line: 'info checking out EXISTING local branch inst-10' },
+        { suffix: 'inst-11', line: 'tracking origin/inst-11' },
+    ];
+    for (const { suffix, line } of cases) {
+        f.deps.lines.length = 0;
+        const target = okPath(await runWith(f, ['--suffix', suffix], {}));
+        const all = f.deps.lines.join('\n');
+        assert.ok(logged(f, line), all);
+        assert.ok(logged(f, 'info installed dependencies with npm in '), all);
+        const modules = fs.lstatSync(path.join(target, 'node_modules'));
+        assert.ok(modules.isDirectory() && !modules.isSymbolicLink(), all);
+        assert.deepEqual(fs.readdirSync(path.join(target, 'node_modules')), ['from-stub']);
+    }
 });
