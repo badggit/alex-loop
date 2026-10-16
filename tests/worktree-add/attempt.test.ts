@@ -152,6 +152,24 @@ await test('yarn berry runs one online attempt with YARN_HTTP_TIMEOUT', async (t
     assert.equal(result.online, true);
 });
 
+await test('a uv offline attempt that needs a Python download leads to the online attempt', async (t) => {
+    const body = [
+        'case "$*" in *--offline*)',
+        '  echo "error: No interpreter found for Python ==3.9.* in managed installations or search path" >&2',
+        '  echo "" >&2',
+        '  echo "hint: A managed Python download is available for Python ==3.9.*, but uv is set to offline mode" >&2',
+        '  exit 2;;',
+        'esac',
+        'exit 0',
+    ].join('\n');
+    const { deps, calls, request } = setup(t, 'uv', body, 'uv');
+    const result = await runInstall(deps, request());
+    assert.equal(calls.length, 2);
+    assert.deepEqual(calls[1]?.args, ['sync', '--frozen']);
+    assert.equal(result.ok, true);
+    assert.equal(result.online, true);
+});
+
 await test('an offline failure that is not a cache miss makes no online call', async (t) => {
     const { deps, calls, request } = setup(t, 'npm', 'echo "npm error code EUSAGE" >&2\nexit 1');
     const result = await runInstall(deps, request());

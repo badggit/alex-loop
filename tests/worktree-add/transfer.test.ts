@@ -55,6 +55,8 @@ const IGNORED_FILES = [
     '.claude/settings.local.json',
     '.venv/bin/python',
     'venv/bin/python',
+    '.venv/pyvenv.cfg',
+    'venv/pyvenv.cfg',
     'config/.env',
 ];
 const COPY_RELS = ['.env', 'CLAUDE.local.md', 'apps/web/.env.local', 'temp.local'];

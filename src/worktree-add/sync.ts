@@ -1,8 +1,8 @@
-import fs from 'node:fs';
 import path from 'node:path';
 
 import { addExcludePatterns, anchoredPattern, TEMP_PATTERN } from './exclude.ts';
-import { errorCode, isOwnLink, JS_DEPS, lstatOrUndefined, parentInside, UV_VENV } from './paths.ts';
+import { makeLink } from './fallback.ts';
+import { isOwnLink, JS_DEPS, lstatOrUndefined, parentInside } from './paths.ts';
 import { hasControlCharacter, showText } from './text.ts';
 import type { Deps, EntryTransfer } from './types.ts';
 
@@ -23,7 +23,8 @@ interface SyncRun {
 
 const COPY_NAMES: ReadonlySet<string> = new Set(['.env', 'CLAUDE.local.md', 'temp.local']);
 const COPY_PREFIX = '.env.';
-const DEPENDENCY_NAMES: ReadonlySet<string> = new Set([JS_DEPS, UV_VENV, 'venv']);
+// Python environments (venv, .venv or any other name) are told by their pyvenv.cfg, never by name alone.
+const DEPENDENCY_NAMES: ReadonlySet<string> = new Set([JS_DEPS]);
 const VENV_MARKER = 'pyvenv.cfg';
 // Build and cache outputs stay per worktree: a link would let one branch overwrite the outputs of another.
 const SKIP_NAMES: ReadonlySet<string> = new Set([
@@ -105,23 +106,6 @@ function destinationOpen(run: SyncRun, rel: string, kind: EntryClass): boolean {
     return kind !== 'link' && isOwnLink(run, rel);
 }
 
-function linkMissing(run: SyncRun, rel: string): boolean {
-    const dest = path.join(run.worktree, rel);
-    if (lstatOrUndefined(dest) !== undefined) {
-        return false;
-    }
-    try {
-        fs.symlinkSync(path.join(run.main, rel), dest);
-        return true;
-    } catch (error) {
-        const code = errorCode(error);
-        if (code !== 'EEXIST') {
-            run.deps.log.warn(`cannot link ${showText(rel)} into the worktree: ${showText(code)}`);
-        }
-        return false;
-    }
-}
-
 // Dependency folders are left to the install stage, which installs them or clones or links them from the main clone.
 async function syncEntry(run: SyncRun, rel: string, kind: EntryClass): Promise<void> {
     if (kind === 'skip' || kind === 'dep' || !parentInside(run.worktree, rel) || !destinationOpen(run, rel, kind)) {
@@ -133,7 +117,7 @@ async function syncEntry(run: SyncRun, rel: string, kind: EntryClass): Promise<v
             return;
         }
         case 'link': {
-            if (linkMissing(run, rel)) {
+            if (makeLink(run, rel) === 'created') {
                 run.linked.push(rel);
             }
             return;

@@ -9,7 +9,9 @@ import {
     projectCommand,
     targetFolders,
     type ProjectContext,
+    type ProjectOutcome,
 } from '../../src/worktree-add/installProject.ts';
+import { chooseManager } from '../../src/worktree-add/managers.ts';
 import { lstatOrUndefined } from '../../src/worktree-add/paths.ts';
 import { PARTIAL_MARKER, privateDir, readPartialMarks } from '../../src/worktree-add/privateArea.ts';
 import { createProcessRunner } from '../../src/worktree-add/proc.ts';
@@ -40,7 +42,7 @@ interface Fixture {
 }
 
 function rootProject(lockNames: readonly string[] = ['package-lock.json']): AssignedProject {
-    return { dir: '', ecosystem: 'js', lockNames, depRels: ['node_modules'], reportOnly: [], auto: true };
+    return { dir: '', ecosystem: 'js', lockNames, depRels: ['node_modules'], linkOnly: [], auto: true };
 }
 
 // A main clone with FILES committed, a linked worktree on branch task and a stub per entry of STUBS on an isolated
@@ -72,11 +74,17 @@ async function makeFixture(
         main,
         worktree,
         privateDir: await privateDir(deps, worktree),
+        projectDirs: [''],
         nowMs: () => Date.now(),
         networkTimeoutMs: 30_000,
         progressMs: 60_000,
     };
     return { main, worktree, bin, env, deps, calls: runner.calls, ctx };
+}
+
+function install(ctx: ProjectContext, project: AssignedProject, deadlineMs: number): Promise<ProjectOutcome> {
+    const choice = chooseManager(path.join(ctx.worktree, project.dir), project.ecosystem, project.lockNames);
+    return installProject(ctx, project, deadlineMs, choice);
 }
 
 function npmFixture(t: TestContext, body: string): Promise<Fixture> {
@@ -137,7 +145,7 @@ await test('targetFolders adds the default folder once and projectCommand runs i
         ecosystem: 'js',
         lockNames: ['pnpm-lock.yaml'],
         depRels: ['web/packages/a/node_modules'],
-        reportOnly: [],
+        linkOnly: [],
         auto: true,
     };
     assert.deepEqual(targetFolders(workspace), ['web/packages/a/node_modules', 'web/node_modules']);
@@ -146,7 +154,7 @@ await test('targetFolders adds the default folder once and projectCommand runs i
         ecosystem: 'uv',
         lockNames: ['uv.lock'],
         depRels: [],
-        reportOnly: [],
+        linkOnly: [],
         auto: true,
     };
     assert.deepEqual(targetFolders(api), ['services/api/.venv']);
@@ -156,7 +164,7 @@ await test('targetFolders adds the default folder once and projectCommand runs i
 
 await test('a successful install leaves the folder, the info line and an empty marker', async (t) => {
     const fixture = await npmFixture(t, 'mkdir -p node_modules/x\nexit 0');
-    const outcome = await installProject(fixture.ctx, rootProject(), minuteAhead());
+    const outcome = await install(fixture.ctx, rootProject(), minuteAhead());
     assert.deepEqual(outcome, { kind: 'installed' });
     assert.equal(
         linesWith(fixture, ' info installed dependencies with npm in ').length,
@@ -172,7 +180,7 @@ await test('an own link at node_modules is unlinked before the install and its t
     const fixture = await npmFixture(t, 'mkdir -p node_modules/x\nexit 0');
     fs.mkdirSync(path.join(fixture.main, 'node_modules', 'kept'), { recursive: true });
     fs.symlinkSync(path.join(fixture.main, 'node_modules'), path.join(fixture.worktree, 'node_modules'));
-    const outcome = await installProject(fixture.ctx, rootProject(), minuteAhead());
+    const outcome = await install(fixture.ctx, rootProject(), minuteAhead());
     assert.deepEqual(outcome, { kind: 'installed' });
     const installed = lstatOrUndefined(path.join(fixture.worktree, 'node_modules'));
     assert.ok(installed?.isDirectory() === true && !installed.isSymbolicLink());
@@ -182,7 +190,7 @@ await test('an own link at node_modules is unlinked before the install and its t
 await test('a real folder at node_modules blocks the install and stays as it was', async (t) => {
     const fixture = await npmFixture(t, 'mkdir -p node_modules/x\nexit 0');
     fs.mkdirSync(path.join(fixture.worktree, 'node_modules', 'own'), { recursive: true });
-    const outcome = await installProject(fixture.ctx, rootProject(), minuteAhead());
+    const outcome = await install(fixture.ctx, rootProject(), minuteAhead());
     assert.deepEqual(outcome, { kind: 'not-installed' });
     const warning =
         ' warn not installed with npm: node_modules already stands in the worktree and is left as it is ' +
@@ -196,16 +204,76 @@ await test('a marked leftover from an earlier run is removed and the install run
     const fixture = await npmFixture(t, 'mkdir -p node_modules/x\nexit 0');
     fs.mkdirSync(path.join(fixture.worktree, 'node_modules', 'stale'), { recursive: true });
     fs.writeFileSync(path.join(fixture.ctx.privateDir ?? '', PARTIAL_MARKER), 'node_modules\n');
-    const outcome = await installProject(fixture.ctx, rootProject(), minuteAhead());
+    const outcome = await install(fixture.ctx, rootProject(), minuteAhead());
     assert.deepEqual(outcome, { kind: 'installed' });
     assert.deepEqual(fs.readdirSync(path.join(fixture.worktree, 'node_modules')), ['x']);
+    assert.deepEqual(markerOf(fixture), []);
+});
+
+await test('a marked leftover whose parent folder is missing counts as removed and the install runs', async (t) => {
+    const fixture = await npmFixture(t, 'mkdir -p node_modules/x\nexit 0');
+    fs.writeFileSync(path.join(fixture.ctx.privateDir ?? '', PARTIAL_MARKER), 'apps/web/node_modules\n');
+    const outcome = await install(fixture.ctx, rootProject(), minuteAhead());
+    assert.deepEqual(outcome, { kind: 'installed' }, fixture.deps.lines.join('\n'));
+    assert.deepEqual(markerOf(fixture), []);
+    assert.deepEqual(linesWith(fixture, 'cannot remove the partial install'), []);
+});
+
+await test('a leftover of a nested project neither blocks nor is removed by the root install', async (t) => {
+    if (process.getuid?.() === 0) {
+        t.skip('root can remove a folder with mode 0500');
+        return;
+    }
+    const fixture = await makeFixture(
+        t,
+        { 'package.json': '{"name":"demo"}\n', 'package-lock.json': NPM_LOCK, 'services/api/uv.lock': 'version = 1\n' },
+        { npm: `${NPM_VERSION}\nmkdir -p node_modules/x\nexit 0` }
+    );
+    const locked = path.join(fixture.worktree, 'services', 'api', '.venv', 'locked');
+    fs.mkdirSync(locked, { recursive: true });
+    fs.writeFileSync(path.join(locked, 'file'), 'stale\n');
+    fs.chmodSync(locked, 0o500);
+    fs.writeFileSync(path.join(fixture.ctx.privateDir ?? '', PARTIAL_MARKER), 'services/api/.venv\n');
+    try {
+        const ctx: ProjectContext = { ...fixture.ctx, projectDirs: ['', 'services/api'] };
+        const outcome = await install(ctx, rootProject(), minuteAhead());
+        assert.deepEqual(outcome, { kind: 'installed' }, fixture.deps.lines.join('\n'));
+        assert.deepEqual(linesWith(fixture, 'cannot remove the partial install'), []);
+        assert.deepEqual(markerOf(fixture), ['services/api/.venv']);
+        assert.ok(fs.existsSync(path.join(locked, 'file')));
+    } finally {
+        fs.chmodSync(locked, 0o700);
+    }
+});
+
+await test('a marked leftover is removed before a missing tool is reported', async (t) => {
+    const fixture = await makeFixture(t, { 'package.json': '{}\n', 'package-lock.json': NPM_LOCK }, {});
+    fs.mkdirSync(path.join(fixture.worktree, 'node_modules', 'stale'), { recursive: true });
+    fs.writeFileSync(path.join(fixture.ctx.privateDir ?? '', PARTIAL_MARKER), 'node_modules\n');
+    const outcome = await install(fixture.ctx, rootProject(), minuteAhead());
+    assert.deepEqual(outcome, { kind: 'tool-missing', manager: 'npm' });
+    assert.equal(lstatOrUndefined(path.join(fixture.worktree, 'node_modules')), undefined);
+    assert.deepEqual(markerOf(fixture), []);
+});
+
+await test('a marked leftover is removed before a conflict is reported', async (t) => {
+    const fixture = await makeFixture(
+        t,
+        { 'package.json': '{}\n', 'package-lock.json': NPM_LOCK, 'yarn.lock': '# yarn lockfile v1\n' },
+        { npm: 'exit 0' }
+    );
+    fs.mkdirSync(path.join(fixture.worktree, 'node_modules', 'stale'), { recursive: true });
+    fs.writeFileSync(path.join(fixture.ctx.privateDir ?? '', PARTIAL_MARKER), 'node_modules\n');
+    const outcome = await install(fixture.ctx, rootProject(['package-lock.json', 'yarn.lock']), minuteAhead());
+    assert.deepEqual(outcome, { kind: 'not-installed' });
+    assert.equal(lstatOrUndefined(path.join(fixture.worktree, 'node_modules')), undefined);
     assert.deepEqual(markerOf(fixture), []);
 });
 
 await test('a missing tool gives tool-missing and creates nothing', async (t) => {
     const fixture = await makeFixture(t, { 'package.json': '{}\n', 'package-lock.json': NPM_LOCK }, {});
     const before = fixture.deps.lines.length;
-    const outcome = await installProject(fixture.ctx, rootProject(), minuteAhead());
+    const outcome = await install(fixture.ctx, rootProject(), minuteAhead());
     assert.deepEqual(outcome, { kind: 'tool-missing', manager: 'npm' });
     assert.equal(fixture.deps.lines.length, before);
     assert.equal(lstatOrUndefined(path.join(fixture.worktree, 'node_modules')), undefined);
@@ -218,7 +286,7 @@ await test('yarn 1 for a berry lock gives the wrong-version group and no install
         { 'package.json': '{}\n', 'yarn.lock': '__metadata:\n  version: 8\n' },
         { yarn: 'echo 1.22.22\nexit 0' }
     );
-    const outcome = await installProject(fixture.ctx, rootProject(['yarn.lock']), minuteAhead());
+    const outcome = await install(fixture.ctx, rootProject(['yarn.lock']), minuteAhead());
     assert.deepEqual(outcome, { kind: 'not-installed' });
     const headline = linesWith(fixture, 'cannot install dependencies with yarn: wrong manager version');
     assert.equal(headline.length, 1, fixture.deps.lines.join('\n'));
@@ -233,7 +301,7 @@ await test('two lock kinds without packageManager give the conflict warning', as
         { 'package.json': '{}\n', 'package-lock.json': NPM_LOCK, 'yarn.lock': '# yarn lockfile v1\n' },
         { npm: 'exit 0' }
     );
-    const outcome = await installProject(fixture.ctx, rootProject(['package-lock.json', 'yarn.lock']), minuteAhead());
+    const outcome = await install(fixture.ctx, rootProject(['package-lock.json', 'yarn.lock']), minuteAhead());
     assert.deepEqual(outcome, { kind: 'not-installed' });
     const warning = linesWith(
         fixture,
@@ -254,7 +322,7 @@ await test('a failed install is cleaned up, logged with the masked output and re
         'exit 1',
     ].join('\n');
     const fixture = await npmFixture(t, body);
-    const outcome = await installProject(fixture.ctx, rootProject(), minuteAhead());
+    const outcome = await install(fixture.ctx, rootProject(), minuteAhead());
     assert.deepEqual(outcome, { kind: 'failed' });
     const index = fixture.deps.lines.findIndex((line) =>
         line.includes(' warn cannot install dependencies with npm: authentication failed (npm error code E401')
@@ -280,7 +348,7 @@ await test('a failed install is cleaned up, logged with the masked output and re
 
 await test('a failed install removes the node_modules it made and keeps a file the user wrote meanwhile', async (t) => {
     const fixture = await npmFixture(t, 'mkdir -p node_modules/partial\necho draft > notes.txt\nexit 1');
-    const outcome = await installProject(fixture.ctx, rootProject(), minuteAhead());
+    const outcome = await install(fixture.ctx, rootProject(), minuteAhead());
     assert.deepEqual(outcome, { kind: 'failed' });
     assert.equal(lstatOrUndefined(path.join(fixture.worktree, 'node_modules')), undefined);
     assert.equal(fs.readFileSync(path.join(fixture.worktree, 'notes.txt'), 'utf8'), 'draft\n');
@@ -302,7 +370,7 @@ await test('a cleanup that cannot finish warns with a removal command and keeps 
     const fixture = await npmFixture(t, body.join('\n'));
     const locked = path.join(fixture.worktree, 'node_modules', 'locked');
     try {
-        const outcome = await installProject(fixture.ctx, rootProject(), minuteAhead());
+        const outcome = await install(fixture.ctx, rootProject(), minuteAhead());
         assert.deepEqual(outcome, { kind: 'failed' });
         const warning = linesWith(fixture, ' warn cannot remove the partial install: ');
         assert.equal(warning.length, 1, fixture.deps.lines.join('\n'));
@@ -321,7 +389,7 @@ await test('a listing that fails after the install warns how to check the projec
         ...fixture.ctx,
         deps: { ...fixture.deps, runner: failingSecondListing(fixture.deps.runner) },
     };
-    const outcome = await installProject(ctx, rootProject(), minuteAhead());
+    const outcome = await install(ctx, rootProject(), minuteAhead());
     assert.deepEqual(outcome, { kind: 'failed' });
     const all = fixture.deps.lines.join('\n');
     const warning = linesWith(fixture, ' warn cannot list what the install created in ');
@@ -343,7 +411,7 @@ await test('a target inside a folder that was untracked before is still removed 
     fs.mkdirSync(path.join(fixture.worktree, 'vendor'));
     fs.writeFileSync(path.join(fixture.worktree, 'vendor', 'own.txt'), 'own\n');
     const project: AssignedProject = { ...rootProject(), depRels: ['vendor/node_modules'] };
-    const outcome = await installProject(fixture.ctx, project, minuteAhead());
+    const outcome = await install(fixture.ctx, project, minuteAhead());
     assert.deepEqual(outcome, { kind: 'failed' });
     assert.equal(lstatOrUndefined(path.join(fixture.worktree, 'vendor', 'node_modules')), undefined);
     assert.deepEqual(fs.readdirSync(path.join(fixture.worktree, 'vendor')), ['own.txt']);
@@ -352,7 +420,7 @@ await test('a target inside a folder that was untracked before is still removed 
 
 await test('a timeout after a lifecycle header names the last step seen', async (t) => {
     const fixture = await npmFixture(t, 'echo "> demo@1.0.0 postinstall"\nsleep 30');
-    const outcome = await installProject(fixture.ctx, rootProject(), fixture.ctx.nowMs() + TIMEOUT_MARGIN_MS);
+    const outcome = await install(fixture.ctx, rootProject(), fixture.ctx.nowMs() + TIMEOUT_MARGIN_MS);
     assert.deepEqual(outcome, { kind: 'failed' });
     assert.equal(linesWith(fixture, 'cannot install dependencies with npm: timed out').length, 1);
     assert.equal(linesWith(fixture, ' warn last step seen: postinstall of demo@1.0.0').length, 1);
@@ -360,7 +428,7 @@ await test('a timeout after a lifecycle header names the last step seen', async 
 
 await test('a silent timeout carries the dropped-packets hint', async (t) => {
     const fixture = await npmFixture(t, 'sleep 30');
-    const outcome = await installProject(fixture.ctx, rootProject(), fixture.ctx.nowMs() + TIMEOUT_MARGIN_MS);
+    const outcome = await install(fixture.ctx, rootProject(), fixture.ctx.nowMs() + TIMEOUT_MARGIN_MS);
     assert.deepEqual(outcome, { kind: 'failed' });
     assert.equal(linesWith(fixture, 'cannot install dependencies with npm: timed out').length, 1);
     assert.equal(linesWith(fixture, 'often a network that silently drops packets (VPN or proxy)').length, 1);
@@ -368,7 +436,7 @@ await test('a silent timeout carries the dropped-packets hint', async (t) => {
 
 await test('an install that rewrites the lock file fails and the lock is restored', async (t) => {
     const fixture = await npmFixture(t, 'echo "{}" > package-lock.json\nexit 0');
-    const outcome = await installProject(fixture.ctx, rootProject(), minuteAhead());
+    const outcome = await install(fixture.ctx, rootProject(), minuteAhead());
     assert.deepEqual(outcome, { kind: 'failed' });
     assert.equal(linesWith(fixture, 'npm: the install changed the lock file').length, 1, fixture.deps.lines.join('\n'));
     assert.equal(fs.readFileSync(path.join(fixture.worktree, 'package-lock.json'), 'utf8'), NPM_LOCK);
@@ -376,7 +444,7 @@ await test('an install that rewrites the lock file fails and the lock is restore
 
 await test('the online attempt after an offline miss decides the class and the log holds both', async (t) => {
     const fixture = await npmFixture(t, `${OFFLINE_MISS_NPM}\necho "npm error code E401" >&2\nexit 1`);
-    const outcome = await installProject(fixture.ctx, rootProject(), minuteAhead());
+    const outcome = await install(fixture.ctx, rootProject(), minuteAhead());
     assert.deepEqual(outcome, { kind: 'failed' });
     const headline = linesWith(fixture, 'cannot install dependencies with npm: authentication failed');
     assert.equal(headline.length, 1, fixture.deps.lines.join('\n'));
@@ -392,7 +460,7 @@ await test('a version query that prints only the token is a wrong version and th
         { 'package.json': '{}\n', 'package-lock.json': NPM_LOCK },
         { npm: 'echo "$NPM_TOKEN"\nexit 0' }
     );
-    const outcome = await installProject(fixture.ctx, rootProject(), minuteAhead());
+    const outcome = await install(fixture.ctx, rootProject(), minuteAhead());
     assert.deepEqual(outcome, { kind: 'not-installed' });
     assert.equal(linesWith(fixture, 'cannot install dependencies with npm: wrong manager version').length, 1);
     assertNoToken(fixture);
@@ -404,7 +472,7 @@ await test('a version query that fails with the token on stderr never logs the t
         { 'package.json': '{}\n', 'package-lock.json': NPM_LOCK },
         { npm: 'echo "bad $NPM_TOKEN" >&2\nexit 2' }
     );
-    const outcome = await installProject(fixture.ctx, rootProject(), minuteAhead());
+    const outcome = await install(fixture.ctx, rootProject(), minuteAhead());
     assert.deepEqual(outcome, { kind: 'not-installed' });
     assert.equal(linesWith(fixture, 'found unknown (--version exited with code 2: bad ***)').length, 1);
     assertNoToken(fixture);
@@ -417,7 +485,7 @@ await test('a hanging version query settles at the project deadline as a wrong v
         { npm: 'exec sleep 60' }
     );
     const started = performance.now();
-    const outcome = await installProject(fixture.ctx, rootProject(), fixture.ctx.nowMs() + 300);
+    const outcome = await install(fixture.ctx, rootProject(), fixture.ctx.nowMs() + 300);
     assert.ok(performance.now() - started < 11_000);
     assert.deepEqual(outcome, { kind: 'not-installed' });
     const headline = linesWith(fixture, 'cannot install dependencies with npm: wrong manager version');
@@ -427,7 +495,7 @@ await test('a hanging version query settles at the project deadline as a wrong v
 
 await test('no time left skips the version query and reports a timeout', async (t) => {
     const fixture = await npmFixture(t, 'exit 0');
-    const outcome = await installProject(fixture.ctx, rootProject(), fixture.ctx.nowMs() - 1);
+    const outcome = await install(fixture.ctx, rootProject(), fixture.ctx.nowMs() - 1);
     assert.deepEqual(outcome, { kind: 'not-installed' });
     assert.equal(linesWith(fixture, 'cannot install dependencies with npm: timed out').length, 1);
     assert.deepEqual(installCalls(fixture), []);
@@ -446,7 +514,7 @@ await test('a marked leftover that cannot be removed blocks the install with a r
     fs.chmodSync(locked, 0o500);
     fs.writeFileSync(path.join(fixture.ctx.privateDir ?? '', PARTIAL_MARKER), 'node_modules\n');
     try {
-        const outcome = await installProject(fixture.ctx, rootProject(), minuteAhead());
+        const outcome = await install(fixture.ctx, rootProject(), minuteAhead());
         assert.deepEqual(outcome, { kind: 'not-installed' });
         const warning = linesWith(
             fixture,
@@ -471,7 +539,7 @@ await test('untracked entries that cannot be listed before the install give not-
         ...fixture.ctx,
         deps: { ...fixture.deps, runner: withOverride(fixture.deps.runner, isListing, failed) },
     };
-    const outcome = await installProject(ctx, rootProject(), minuteAhead());
+    const outcome = await install(ctx, rootProject(), minuteAhead());
     assert.deepEqual(outcome, { kind: 'not-installed' });
     const warning = linesWith(fixture, ' warn not installed with npm: cannot list the untracked entries of ');
     assert.equal(warning.length, 1, fixture.deps.lines.join('\n'));
@@ -489,7 +557,7 @@ await test('a lock file that cannot be restored after the install gets its own w
     const fixture = await npmFixture(t, 'echo "{}" > package-lock.json\nchmod 444 package-lock.json\nexit 0');
     const lock = path.join(fixture.worktree, 'package-lock.json');
     try {
-        const outcome = await installProject(fixture.ctx, rootProject(), minuteAhead());
+        const outcome = await install(fixture.ctx, rootProject(), minuteAhead());
         assert.deepEqual(outcome, { kind: 'failed' });
         const warning = linesWith(fixture, ' warn cannot restore the lock file after npm: ');
         assert.equal(warning.length, 1, fixture.deps.lines.join('\n'));

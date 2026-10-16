@@ -38,8 +38,15 @@ await test('privateDir gives undefined outside a git checkout', async (t) => {
 await test('logFileName names the root project by manager and others by a slug', () => {
     assert.equal(logFileName('npm', ''), 'alex-loop-install-npm.log');
     assert.equal(logFileName('npm', '.'), 'alex-loop-install-npm.log');
-    assert.equal(logFileName('uv', 'services/api'), 'alex-loop-install-uv-services-api.log');
-    assert.equal(logFileName('pnpm', 'apps/my app+x'), 'alex-loop-install-pnpm-apps-my_app_x.log');
+    assert.equal(logFileName('uv', 'services/api'), 'alex-loop-install-uv-services%2Fapi.log');
+    assert.equal(logFileName('pnpm', 'apps/my app+x'), 'alex-loop-install-pnpm-apps%2Fmy%20app%2Bx.log');
+    assert.equal(logFileName('npm', 'caf\u00E9'), 'alex-loop-install-npm-caf%C3%A9.log');
+});
+
+await test('logFileName never gives two project folders the same name', () => {
+    const dirs = ['a-b', 'a/b', 'a_b', 'a b', 'a%2Fb', 'a%b', 'a-/b', 'a/-b'];
+    const names = dirs.map((dir) => logFileName('npm', dir));
+    assert.equal(new Set(names).size, dirs.length, names.join('\n'));
 });
 
 await test('writeInstallLog overwrites an existing wider file and leaves it at 0600', (t) => {

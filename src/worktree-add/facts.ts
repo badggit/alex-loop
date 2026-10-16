@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { canonical, lstatOrUndefined } from './paths.ts';
+import { canonical, errorCode, lstatOrUndefined } from './paths.ts';
 import { showText } from './text.ts';
 import type {
     CommandResult,
@@ -24,10 +24,6 @@ type CommonDir = { ok: true; dir: string } | { ok: false; reason: string };
 
 // show-ref --verify --quiet exits 1 for a ref that does not exist; every other nonzero exit is an error.
 const REF_ABSENT_CODE = 1;
-
-function errorCode(error: unknown): unknown {
-    return error instanceof Error && 'code' in error ? error.code : undefined;
-}
 
 function git(deps: Deps, dir: string, args: readonly string[]): Promise<CommandResult> {
     return deps.runner.run({ file: 'git', args: ['-C', dir, ...args] });

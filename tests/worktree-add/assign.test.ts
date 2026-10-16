@@ -4,7 +4,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 
 import { assignDependencies, type WorkspaceCheck } from '../../src/worktree-add/assign.ts';
-import { isWorkspaceMember, type Project } from '../../src/worktree-add/discover.ts';
+import { isWorkspaceMember, type Project, type WorkspaceSpecs } from '../../src/worktree-add/discover.ts';
 
 import { tempRoot } from './support/tmp.ts';
 
@@ -22,8 +22,8 @@ await test('a root JS project owns node_modules folders below it and a folderles
     );
     assert.deepEqual(assignment, {
         projects: [
-            { ...ROOT_JS, depRels: ['node_modules', 'packages/a/node_modules'], reportOnly: [], auto: true },
-            { ...DEMO_JS, depRels: [], reportOnly: [], auto: false },
+            { ...ROOT_JS, depRels: ['node_modules', 'packages/a/node_modules'], linkOnly: [], auto: true },
+            { ...DEMO_JS, depRels: [], linkOnly: [], auto: false },
         ],
         orphans: [],
     });
@@ -55,7 +55,7 @@ await test('a uv project installs only its own .venv and reports every other env
             {
                 ...API_UV,
                 depRels: ['services/api/.venv'],
-                reportOnly: ['services/api/venv', 'services/api/tools/.venv'],
+                linkOnly: ['services/api/venv', 'services/api/tools/.venv'],
                 auto: true,
             },
         ],
@@ -68,7 +68,7 @@ await test('a uv project with only report-only environments is still auto', () =
     assert.deepEqual(assignment.projects[0], {
         ...API_UV,
         depRels: [],
-        reportOnly: ['services/api/venv'],
+        linkOnly: ['services/api/venv'],
         auto: true,
     });
 });
@@ -83,7 +83,7 @@ await test('folders without an owner of their ecosystem are orphans', () => {
 
     const noJs = assignDependencies([API_UV], ['web/node_modules', 'services/api/node_modules'], NO_WORKSPACE);
     assert.deepEqual(noJs.orphans, ['web/node_modules', 'services/api/node_modules']);
-    assert.deepEqual(noJs.projects, [{ ...API_UV, depRels: [], reportOnly: [], auto: false }]);
+    assert.deepEqual(noJs.projects, [{ ...API_UV, depRels: [], linkOnly: [], auto: false }]);
 });
 
 await test('a JS project does not own node_modules in a sibling folder with a shared prefix', () => {
@@ -94,7 +94,7 @@ await test('a JS project does not own node_modules in a sibling folder with a sh
 
 await test('a root JS project with no folders is still auto', () => {
     assert.deepEqual(assignDependencies([ROOT_JS], [], NO_WORKSPACE), {
-        projects: [{ ...ROOT_JS, depRels: [], reportOnly: [], auto: true }],
+        projects: [{ ...ROOT_JS, depRels: [], linkOnly: [], auto: true }],
         orphans: [],
     });
 });
@@ -102,7 +102,7 @@ await test('a root JS project with no folders is still auto', () => {
 await test('a root uv project is auto and owns the root .venv', () => {
     const rootUv: Project = { dir: '', ecosystem: 'uv', lockNames: ['uv.lock'] };
     assert.deepEqual(assignDependencies([rootUv], ['.venv'], NO_WORKSPACE), {
-        projects: [{ ...rootUv, depRels: ['.venv'], reportOnly: [], auto: true }],
+        projects: [{ ...rootUv, depRels: ['.venv'], linkOnly: [], auto: true }],
         orphans: [],
     });
 });
@@ -118,7 +118,7 @@ await test('a nested node_modules outside the workspace of the root is an orphan
         PACKAGES_WORKSPACE
     );
     assert.deepEqual(assignment, {
-        projects: [{ ...ROOT_JS, depRels: ['node_modules', 'packages/a/node_modules'], reportOnly: [], auto: true }],
+        projects: [{ ...ROOT_JS, depRels: ['node_modules', 'packages/a/node_modules'], linkOnly: [], auto: true }],
         orphans: ['tools/x/node_modules'],
     });
     const plain = assignDependencies([ROOT_JS], ['node_modules', 'packages/a/node_modules'], NO_WORKSPACE);
@@ -174,4 +174,15 @@ await test('workspace members come from package.json workspaces in both forms an
     for (const [project, folder, expected] of cases) {
         assert.equal(isWorkspaceMember(root, project, folder), expected, `${project.dir}|${folder}`);
     }
+});
+
+await test('a shared specs map reads the workspace manifests of a project once', (t) => {
+    const root = tempRoot(t);
+    writeFiles(root, { 'package.json': '{"workspaces":["packages/*"]}\n' });
+    const project: Project = { dir: '', ecosystem: 'js', lockNames: ['package-lock.json'] };
+    const specs: WorkspaceSpecs = new Map();
+    assert.equal(isWorkspaceMember(root, project, 'packages/a', specs), true);
+    fs.rmSync(path.join(root, 'package.json'));
+    assert.equal(isWorkspaceMember(root, project, 'packages/b', specs), true);
+    assert.equal(isWorkspaceMember(root, project, 'packages/b'), false);
 });

@@ -208,9 +208,9 @@ await test('a link that cannot be made warns and gives failed', async (t) => {
     assert.deepEqual(messages(fixture.deps.lines), [`warn cannot link ${rel} into the worktree: ENAMETOOLONG`]);
 });
 
-await test('a rel whose parent is missing gives present', async (t) => {
+await test('a rel whose parent is missing gives no-parent and creates nothing', async (t) => {
     const fixture = makeFixture(t);
     const results = await applyFallback(fixture.deps, paths(fixture), fakeTransfer(), ['missing/.venv']);
-    assert.deepEqual(results, [{ rel: 'missing/.venv', kind: 'present' }]);
+    assert.deepEqual(results, [{ rel: 'missing/.venv', kind: 'no-parent' }]);
     assert.equal(fs.existsSync(path.join(fixture.worktree, 'missing')), false);
 });

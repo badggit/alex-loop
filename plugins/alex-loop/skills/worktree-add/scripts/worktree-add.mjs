@@ -333,6 +333,9 @@ function parentInside(root, rel) {
   const parent = realOrUndefined(path.dirname(path.join(root, rel)));
   return realRoot !== void 0 && parent === path.join(realRoot, path.dirname(rel));
 }
+function parentExists(root, rel) {
+  return realOrUndefined(path.dirname(path.join(root, rel))) !== void 0;
+}
 var JS_DEPS, UV_VENV;
 var init_paths = __esm({
   "src/worktree-add/paths.ts"() {
@@ -345,9 +348,6 @@ var init_paths = __esm({
 // src/worktree-add/place.ts
 import fs3 from "node:fs";
 import path2 from "node:path";
-function errorCode2(error) {
-  return error instanceof Error && "code" in error && typeof error.code === "string" ? error.code : "unknown";
-}
 function removeQuietly(file) {
   try {
     fs3.rmSync(file, { recursive: true, force: true });
@@ -446,7 +446,7 @@ function moveIntoPlace(temp, request, rename) {
     if (replacesOwnLink) {
       restoreOwnLink(dest, ownLinkText);
     }
-    return { ok: false, reason: `cannot rename the copy into place (${errorCode2(error)})` };
+    return { ok: false, reason: `cannot rename the copy into place (${errorCode(error)})` };
   }
 }
 async function placeCopy(deps, request, rename = fs3.renameSync) {
@@ -656,9 +656,6 @@ var init_cowGate = __esm({
 // src/worktree-add/worktrees.ts
 import fs5 from "node:fs";
 import path4 from "node:path";
-function errorCode3(error) {
-  return error instanceof Error && "code" in error ? error.code : void 0;
-}
 function hasFlag(line, flag) {
   return line === flag || line.startsWith(`${flag} `);
 }
@@ -718,7 +715,7 @@ function lockMarkerState(adminDir) {
     fs5.lstatSync(path4.join(adminDir, "locked"));
     return "locked";
   } catch (error) {
-    return errorCode3(error) === "ENOENT" ? "unlocked" : "unknown";
+    return errorCode(error) === "ENOENT" ? "unlocked" : "unknown";
   }
 }
 function lockStateOfFolder(worktreePath, commonDir, isMain) {
@@ -1055,9 +1052,6 @@ var init_decide = __esm({
 // src/worktree-add/facts.ts
 import fs7 from "node:fs";
 import path6 from "node:path";
-function errorCode4(error) {
-  return error instanceof Error && "code" in error ? error.code : void 0;
-}
 function git2(deps, dir, args) {
   return deps.runner.run({ file: "git", args: ["-C", dir, ...args] });
 }
@@ -1075,7 +1069,7 @@ function targetStateOf(target) {
   try {
     return fs7.lstatSync(target).isSymbolicLink() ? "symlink" : "present";
   } catch (error) {
-    return errorCode4(error) === "ENOENT" ? "absent" : "unreadable";
+    return errorCode(error) === "ENOENT" ? "absent" : "unreadable";
   }
 }
 function findRegistered(entries, target) {
@@ -1199,7 +1193,7 @@ function nearestOwner(projects, ecosystem, folder) {
 }
 function assignDependencies(projects, depRels, isMember2) {
   const installs = projects.map(() => []);
-  const reports = projects.map(() => []);
+  const links = projects.map(() => []);
   const orphans = [];
   for (const rel of depRels) {
     const { parent, name } = splitRel(rel);
@@ -1211,16 +1205,16 @@ function assignDependencies(projects, depRels, isMember2) {
       continue;
     }
     const installed = ecosystem === "js" || name === UV_VENV && parent === project.dir;
-    (installed ? installs : reports)[owner]?.push(rel);
+    (installed ? installs : links)[owner]?.push(rel);
   }
   const assigned = projects.map((project, index) => {
     const ownDeps = installs[index] ?? [];
-    const ownReports = reports[index] ?? [];
+    const ownLinks = links[index] ?? [];
     return {
       ...project,
       depRels: ownDeps,
-      reportOnly: ownReports,
-      auto: project.dir === "" || ownDeps.length > 0 || ownReports.length > 0
+      linkOnly: ownLinks,
+      auto: project.dir === "" || ownDeps.length > 0 || ownLinks.length > 0
     };
   });
   return { projects: assigned, orphans };
@@ -1428,7 +1422,8 @@ var init_attempt = __esm({
         file: "uv",
         shown: "uv sync --frozen",
         offline: ["sync", "--frozen", "--offline"],
-        offlineMissSignals: ["not found in the cache", "Network connectivity is disabled"],
+        // The last one is uv's hint when the project's Python must be downloaded, which offline mode forbids.
+        offlineMissSignals: ["not found in the cache", "Network connectivity is disabled", "uv is set to offline mode"],
         online: () => ["sync", "--frozen"],
         env: UV_OWN_ENV,
         onlineEnv: uvEnv
@@ -1785,9 +1780,18 @@ function uvWorkspace(dir) {
   const include = arrays.get("members") ?? [];
   return include.length > 0 ? { include, exclude: arrays.get("exclude") ?? [] } : void 0;
 }
-function workspaceOf(worktree, project) {
+function specKey(project) {
+  return `${project.ecosystem}\0${project.dir}`;
+}
+function workspaceOf(worktree, project, specs) {
+  const key = specKey(project);
+  if (specs.has(key)) {
+    return specs.get(key);
+  }
   const dir = path8.join(worktree, project.dir);
-  return project.ecosystem === "js" ? jsWorkspace(dir) : uvWorkspace(dir);
+  const spec = project.ecosystem === "js" ? jsWorkspace(dir) : uvWorkspace(dir);
+  specs.set(key, spec);
+  return spec;
 }
 function relativeBelow(ancestor, dir) {
   if (ancestor === "") {
@@ -1823,13 +1827,13 @@ function compareProjects(a, b) {
   }
   return a.ecosystem < b.ecosystem ? -1 : 1;
 }
-async function discoverProjects(deps, worktree) {
+async function discoverProjects(deps, worktree, specs = /* @__PURE__ */ new Map()) {
   const result = await deps.runner.run({ file: "git", args: ["-C", worktree, "ls-files", "-z"] });
   if (result.code !== 0) {
     return void 0;
   }
   const projects = groupLocks(result.stdout.split("\0").filter((file) => file.length > 0));
-  const roots = projects.map((project) => ({ project, spec: workspaceOf(worktree, project) })).filter((root) => root.spec !== void 0);
+  const roots = projects.map((project) => ({ project, spec: workspaceOf(worktree, project, specs) })).filter((root) => root.spec !== void 0);
   const kept = projects.filter(
     (project) => !roots.some((root) => {
       if (root.project.ecosystem !== project.ecosystem) {
@@ -1841,8 +1845,8 @@ async function discoverProjects(deps, worktree) {
   );
   return kept.toSorted(compareProjects);
 }
-function isWorkspaceMember(worktree, project, folder) {
-  const spec = workspaceOf(worktree, project);
+function isWorkspaceMember(worktree, project, folder, specs = /* @__PURE__ */ new Map()) {
+  const spec = workspaceOf(worktree, project, specs);
   const rel = relativeBelow(project.dir, folder);
   return spec !== void 0 && rel !== void 0 && isMember(spec, rel);
 }
@@ -1870,17 +1874,11 @@ function anchoredPattern(rel) {
   const escaped = rel.replaceAll(GLOB_CHARACTERS, String.raw`\$&`);
   return `/${escaped.endsWith(" ") ? `${escaped.slice(0, -1)}${String.raw`\ `}` : escaped}`;
 }
-function errorCode5(error) {
-  if (error instanceof Error && "code" in error && typeof error.code === "string") {
-    return error.code;
-  }
-  return;
-}
 function readExisting(file) {
   try {
     return { ok: true, text: fs10.readFileSync(file, "utf8") };
   } catch (error) {
-    return errorCode5(error) === "ENOENT" ? { ok: true, text: "" } : { ok: false };
+    return errorCode(error) === "ENOENT" ? { ok: true, text: "" } : { ok: false };
   }
 }
 async function excludeFilePath(deps, worktree) {
@@ -1930,6 +1928,7 @@ var TEMP_PATTERN, EXCLUDE_HEADER, FAILURE_TAIL, GLOB_CHARACTERS;
 var init_exclude = __esm({
   "src/worktree-add/exclude.ts"() {
     "use strict";
+    init_paths();
     init_text();
     TEMP_PATTERN = ".alex-loop-tmp-*";
     EXCLUDE_HEADER = "# alex-loop worktree-add: links, dependency clones and copy temps in worktrees, ignored in the main clone already";
@@ -2164,22 +2163,29 @@ var init_failures = __esm({
 // src/worktree-add/fallback.ts
 import fs11 from "node:fs";
 import path10 from "node:path";
-function ensureLink(run, rel) {
+function makeLink(run, rel) {
   const dest = path10.join(run.worktree, rel);
   if (lstatOrUndefined(dest) !== void 0) {
-    return isOwnLink(run, rel) ? "linked" : "present";
+    return "exists";
   }
   try {
     fs11.symlinkSync(path10.join(run.main, rel), dest);
-    return "linked";
+    return "created";
   } catch (error) {
     const code = errorCode(error);
     if (code === "EEXIST") {
-      return isOwnLink(run, rel) ? "linked" : "present";
+      return "exists";
     }
     run.deps.log.warn(`cannot link ${showText(rel)} into the worktree: ${showText(code)}`);
     return "failed";
   }
+}
+function ensureLink(run, rel) {
+  const result = makeLink(run, rel);
+  if (result === "exists") {
+    return isOwnLink(run, rel) ? "linked" : "present";
+  }
+  return result === "created" ? "linked" : "failed";
 }
 async function cloneOrLink(run, rel) {
   const outcome = await run.transfer.cloneDependency(rel);
@@ -2197,6 +2203,9 @@ function destinationOpen(run, rel) {
   return lstatOrUndefined(path10.join(run.worktree, rel)) === void 0 || isOwnLink(run, rel);
 }
 async function fallbackFor(run, rel) {
+  if (!parentExists(run.worktree, rel)) {
+    return "no-parent";
+  }
   if (!parentInside(run.worktree, rel) || !destinationOpen(run, rel)) {
     return "present";
   }
@@ -2263,6 +2272,9 @@ function removeSafely(root, rel) {
   const refused2 = refusal(clean);
   if (refused2 !== void 0) {
     return { ok: false, reason: refused2 };
+  }
+  if (realOrUndefined(root) !== void 0 && !parentExists(root, clean)) {
+    return { ok: true };
   }
   if (!parentInside(root, clean)) {
     return { ok: false, reason: `refused a path whose parent is not inside ${showText(root)}: ${showText(clean)}` };
@@ -2360,10 +2372,166 @@ var init_cleanup = __esm({
   }
 });
 
+// src/worktree-add/privateArea.ts
+import fs13 from "node:fs";
+import path12 from "node:path";
+async function privateDir(deps, worktree) {
+  const result = await deps.runner.run({ file: "git", args: ["-C", worktree, "rev-parse", "--absolute-git-dir"] });
+  const dir = result.stdout.trim();
+  if (result.code !== 0 || dir.length === 0) {
+    return;
+  }
+  return dir;
+}
+function nameSafe(text) {
+  let result = "";
+  for (const char of text) {
+    if (SAFE_NAME_CHARACTER.test(char)) {
+      result += char;
+      continue;
+    }
+    for (const byte of Buffer.from(char, "utf8")) {
+      result += `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+    }
+  }
+  return result;
+}
+function logFileName(manager, projectDir) {
+  const trimmed = projectDir.replace(/\/+$/u, "");
+  if (trimmed === "" || trimmed === ".") {
+    return `${LOG_PREFIX}-${nameSafe(manager)}.log`;
+  }
+  return `${LOG_PREFIX}-${nameSafe(manager)}-${nameSafe(trimmed)}.log`;
+}
+function writeInstallLog(dir, fileName, text) {
+  const file = path12.join(dir, fileName);
+  const noFollow = fs13.constants.O_NOFOLLOW ?? 0;
+  const flags = fs13.constants.O_WRONLY | fs13.constants.O_CREAT | fs13.constants.O_TRUNC | noFollow;
+  let fd;
+  try {
+    fd = fs13.openSync(file, flags, LOG_MODE);
+    fs13.fchmodSync(fd, LOG_MODE);
+    fs13.writeFileSync(fd, text);
+    return { ok: true, path: file };
+  } catch (error) {
+    return { ok: false, reason: errorCode(error) };
+  } finally {
+    if (fd !== void 0) {
+      fs13.closeSync(fd);
+    }
+  }
+}
+function readMarks(dir) {
+  let text;
+  try {
+    text = fs13.readFileSync(path12.join(dir, PARTIAL_MARKER), "utf8");
+  } catch (error) {
+    return errorCode(error) === "ENOENT" ? [] : void 0;
+  }
+  return [...new Set(text.split("\n").filter((line) => line.length > 0))];
+}
+function readPartialMarks(dir) {
+  return readMarks(dir) ?? [];
+}
+function writePartialMarks(dir, rels) {
+  const file = path12.join(dir, PARTIAL_MARKER);
+  try {
+    if (rels.length === 0) {
+      fs13.rmSync(file, { force: true });
+    } else {
+      fs13.writeFileSync(file, `${rels.join("\n")}
+`);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+function addPartialMarks(dir, rels) {
+  const marks = readMarks(dir);
+  if (marks === void 0) {
+    return false;
+  }
+  return writePartialMarks(dir, [.../* @__PURE__ */ new Set([...marks, ...rels])]);
+}
+function clearPartialMarks(dir, rels) {
+  const marks = readMarks(dir);
+  if (marks === void 0) {
+    return false;
+  }
+  const cleared = new Set(rels);
+  return writePartialMarks(
+    dir,
+    marks.filter((rel) => !cleared.has(rel))
+  );
+}
+var PARTIAL_MARKER, LOG_PREFIX, LOG_MODE, SAFE_NAME_CHARACTER;
+var init_privateArea = __esm({
+  "src/worktree-add/privateArea.ts"() {
+    "use strict";
+    init_paths();
+    PARTIAL_MARKER = "alex-loop-partial-install";
+    LOG_PREFIX = "alex-loop-install";
+    LOG_MODE = 384;
+    SAFE_NAME_CHARACTER = /^[\w.-]$/u;
+  }
+});
+
+// src/worktree-add/leftovers.ts
+import path13 from "node:path";
+function markOwner(projectDirs, rel) {
+  let best;
+  for (const dir of projectDirs) {
+    if (isAtOrAbove(dir, rel) && (best === void 0 || dir.length > best.length)) {
+      best = dir;
+    }
+  }
+  return best;
+}
+function removeMarkedLeftovers(scope, owns) {
+  const dir = scope.privateDir;
+  if (dir === void 0) {
+    return { ok: true };
+  }
+  const removed = [];
+  const failed = [];
+  let firstReason;
+  for (const rel of readPartialMarks(dir).filter((mark) => owns(mark))) {
+    const result = removeSafely(scope.worktree, rel);
+    if (result.ok) {
+      removed.push(rel);
+    } else {
+      failed.push(rel);
+      firstReason ??= result.reason;
+    }
+  }
+  if (removed.length > 0 && !clearPartialMarks(dir, removed)) {
+    scope.deps.log.warn(`cannot update the partial install marker in ${showText(dir)}`);
+  }
+  if (firstReason === void 0) {
+    return { ok: true };
+  }
+  const command = removalCommand(failed.map((rel) => path13.join(scope.worktree, rel)));
+  return {
+    ok: false,
+    failed,
+    problem: `cannot remove the partial install of an earlier run: ${showText(firstReason)}; remove it with: ${showText(command)}`
+  };
+}
+var init_leftovers = __esm({
+  "src/worktree-add/leftovers.ts"() {
+    "use strict";
+    init_assign();
+    init_cleanup();
+    init_privateArea();
+    init_text();
+  }
+});
+
 // src/worktree-add/proc.ts
 import { spawn } from "node:child_process";
 import { constants as osConstants } from "node:os";
-function errorCode6(error) {
+function errorCode2(error) {
   if (error instanceof Error && "code" in error && typeof error.code === "string") {
     return error.code;
   }
@@ -2412,7 +2580,7 @@ function groupHasMembers(pid) {
     process.kill(-pid, 0);
     return true;
   } catch (error) {
-    return errorCode6(error) !== "ESRCH";
+    return errorCode2(error) !== "ESRCH";
   }
 }
 function trySpawn(request, env) {
@@ -2425,7 +2593,7 @@ function trySpawn(request, env) {
     });
     return { child };
   } catch (error) {
-    return { error: errorCode6(error) ?? (error instanceof Error ? error.message : "spawn failed") };
+    return { error: errorCode2(error) ?? (error instanceof Error ? error.message : "spawn failed") };
   }
 }
 function ignoreResult() {
@@ -2513,7 +2681,7 @@ function superviseChild(child, timeoutMs) {
     output.stderr += chunk;
   });
   child.on("error", (error) => {
-    finish({ code: SPAWN_FAILED_CODE, ...output, spawnError: errorCode6(error) ?? error.message });
+    finish({ code: SPAWN_FAILED_CODE, ...output, spawnError: errorCode2(error) ?? error.message });
   });
   child.on("exit", (code, signal) => {
     exitCode = exitCodeOf(code, signal);
@@ -2561,7 +2729,7 @@ function pidAlive(pid) {
     process.kill(pid, 0);
     return true;
   } catch (error) {
-    return errorCode6(error) === "EPERM";
+    return errorCode2(error) === "EPERM";
   }
 }
 var SPAWN_FAILED_CODE, KILLED_CODE, KILL_GRACE_MS, GIVE_UP_MS, GROUP_POLL_MS, MAX_TIMER_MS;
@@ -2578,8 +2746,8 @@ var init_proc = __esm({
 });
 
 // src/worktree-add/managers.ts
-import fs13 from "node:fs";
-import path12 from "node:path";
+import fs14 from "node:fs";
+import path14 from "node:path";
 function executableOf(manager) {
   return EXECUTABLES[manager];
 }
@@ -2589,22 +2757,22 @@ function isJsFamily(name) {
 function readHead(file) {
   let fd;
   try {
-    fd = fs13.openSync(file, "r");
+    fd = fs14.openSync(file, "r");
     const buffer = Buffer.alloc(HEAD_BYTES);
-    const size = fs13.readSync(fd, buffer, 0, HEAD_BYTES, 0);
+    const size = fs14.readSync(fd, buffer, 0, HEAD_BYTES, 0);
     return buffer.subarray(0, size).toString("utf8");
   } catch {
     return;
   } finally {
     if (fd !== void 0) {
-      fs13.closeSync(fd);
+      fs14.closeSync(fd);
     }
   }
 }
 function readPackageManagerField(projectDir) {
   let parsed;
   try {
-    parsed = JSON.parse(fs13.readFileSync(path12.join(projectDir, "package.json"), "utf8"));
+    parsed = JSON.parse(fs14.readFileSync(path14.join(projectDir, "package.json"), "utf8"));
   } catch {
     return { kind: "absent" };
   }
@@ -2628,7 +2796,7 @@ function exactMajor(name, major) {
   return { text: `${name} ${major}`, accepts: (found) => found === major };
 }
 function yarnKind(projectDir) {
-  const head = readHead(path12.join(projectDir, "yarn.lock")) ?? "";
+  const head = readHead(path14.join(projectDir, "yarn.lock")) ?? "";
   if (/^__metadata:/m.test(head)) {
     return "yarn-berry";
   }
@@ -2638,7 +2806,7 @@ function yarnKind(projectDir) {
   return;
 }
 function yarnPathMajor(projectDir) {
-  const rc = readHead(path12.join(projectDir, ".yarnrc.yml")) ?? "";
+  const rc = readHead(path14.join(projectDir, ".yarnrc.yml")) ?? "";
   const match = /^yarnPath:\s*["']?([^"'\n#]*?)["']?\s*(?:#.*)?$/m.exec(rc);
   const release = /(?:^|\/)yarn-(\d+)\.\d+\.\d+\.cjs$/.exec(match?.[1] ?? "");
   return release?.[1] === void 0 ? void 0 : Number(release[1]);
@@ -2651,7 +2819,7 @@ function berryExpectation(projectDir) {
   return { text: "yarn 2 or newer", accepts: (major) => major >= 2 };
 }
 function pnpmExpectation(projectDir) {
-  const head = readHead(path12.join(projectDir, "pnpm-lock.yaml")) ?? "";
+  const head = readHead(path14.join(projectDir, "pnpm-lock.yaml")) ?? "";
   const match = /^lockfileVersion:\s*["']?(\d+)(?:\.\d+)?["']?\s*$/m.exec(head);
   const majors = match?.[1] === void 0 ? void 0 : PNPM_LOCK_MAJORS.get(Number(match[1]));
   if (majors === void 0) {
@@ -2822,106 +2990,22 @@ var init_managers = __esm({
   }
 });
 
-// src/worktree-add/privateArea.ts
-import fs14 from "node:fs";
-import path13 from "node:path";
-async function privateDir(deps, worktree) {
-  const result = await deps.runner.run({ file: "git", args: ["-C", worktree, "rev-parse", "--absolute-git-dir"] });
-  const dir = result.stdout.trim();
-  if (result.code !== 0 || dir.length === 0) {
-    return;
-  }
-  return dir;
-}
-function nameSafe(text) {
-  return text.replaceAll("/", "-").replaceAll(UNSAFE_NAME_CHARACTER, "_");
-}
-function logFileName(manager, projectDir) {
-  const trimmed = projectDir.replace(/\/+$/u, "");
-  if (trimmed === "" || trimmed === ".") {
-    return `${LOG_PREFIX}-${nameSafe(manager)}.log`;
-  }
-  return `${LOG_PREFIX}-${nameSafe(manager)}-${nameSafe(trimmed)}.log`;
-}
-function writeInstallLog(dir, fileName, text) {
-  const file = path13.join(dir, fileName);
-  const noFollow = fs14.constants.O_NOFOLLOW ?? 0;
-  const flags = fs14.constants.O_WRONLY | fs14.constants.O_CREAT | fs14.constants.O_TRUNC | noFollow;
-  let fd;
-  try {
-    fd = fs14.openSync(file, flags, LOG_MODE);
-    fs14.fchmodSync(fd, LOG_MODE);
-    fs14.writeFileSync(fd, text);
-    return { ok: true, path: file };
-  } catch (error) {
-    return { ok: false, reason: errorCode(error) };
-  } finally {
-    if (fd !== void 0) {
-      fs14.closeSync(fd);
-    }
-  }
-}
-function readMarks(dir) {
-  let text;
-  try {
-    text = fs14.readFileSync(path13.join(dir, PARTIAL_MARKER), "utf8");
-  } catch (error) {
-    return errorCode(error) === "ENOENT" ? [] : void 0;
-  }
-  return [...new Set(text.split("\n").filter((line) => line.length > 0))];
-}
-function readPartialMarks(dir) {
-  return readMarks(dir) ?? [];
-}
-function writePartialMarks(dir, rels) {
-  const file = path13.join(dir, PARTIAL_MARKER);
-  try {
-    if (rels.length === 0) {
-      fs14.rmSync(file, { force: true });
-    } else {
-      fs14.writeFileSync(file, `${rels.join("\n")}
-`);
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-function addPartialMarks(dir, rels) {
-  const marks = readMarks(dir);
-  if (marks === void 0) {
-    return false;
-  }
-  return writePartialMarks(dir, [.../* @__PURE__ */ new Set([...marks, ...rels])]);
-}
-function clearPartialMarks(dir, rels) {
-  const marks = readMarks(dir);
-  if (marks === void 0) {
-    return false;
-  }
-  const cleared = new Set(rels);
-  return writePartialMarks(
-    dir,
-    marks.filter((rel) => !cleared.has(rel))
-  );
-}
-var PARTIAL_MARKER, LOG_PREFIX, LOG_MODE, UNSAFE_NAME_CHARACTER;
-var init_privateArea = __esm({
-  "src/worktree-add/privateArea.ts"() {
-    "use strict";
-    init_paths();
-    PARTIAL_MARKER = "alex-loop-partial-install";
-    LOG_PREFIX = "alex-loop-install";
-    LOG_MODE = 384;
-    UNSAFE_NAME_CHARACTER = /[^\w.-]/gu;
-  }
-});
-
 // src/worktree-add/installProject.ts
-import path14 from "node:path";
+import path15 from "node:path";
+function ranManager(outcome) {
+  return outcome.kind === "installed" || outcome.kind === "failed";
+}
+function worktreeRel(project, rel) {
+  return project.dir === "" ? rel : `${project.dir}/${rel}`;
+}
 function defaultFolder(project) {
-  const name = project.ecosystem === "js" ? JS_DEPS : UV_VENV;
-  return project.dir === "" ? name : `${project.dir}/${name}`;
+  return worktreeRel(project, project.ecosystem === "js" ? JS_DEPS : UV_VENV);
+}
+function projectPlace(project) {
+  return project.dir === "" ? "the worktree root" : showText(project.dir);
+}
+function projectLabel(project, manager) {
+  return project.dir === "" ? manager : `${manager} in ${showText(project.dir)}`;
 }
 function targetFolders(project) {
   return [.../* @__PURE__ */ new Set([...project.depRels, defaultFolder(project)])];
@@ -2933,19 +3017,13 @@ function projectCommand(project, command) {
   return project.dir === "" ? command : `cd ${shellWord(project.dir)} && ${command}`;
 }
 function projectPath(run) {
-  return path14.join(run.ctx.worktree, run.project.dir);
-}
-function worktreeRel(project, rel) {
-  return project.dir === "" ? rel : `${project.dir}/${rel}`;
-}
-function isInProject(project, rel) {
-  return project.dir === "" || rel === project.dir || rel.startsWith(`${project.dir}/`);
+  return path15.join(run.ctx.worktree, run.project.dir);
 }
 function absolutePaths(run, rels) {
-  return rels.map((rel) => path14.join(run.ctx.worktree, rel));
+  return rels.map((rel) => path15.join(run.ctx.worktree, rel));
 }
 function missingTargets(run) {
-  return run.targets.filter((rel) => lstatOrUndefined(path14.join(run.ctx.worktree, rel)) === void 0);
+  return run.targets.filter((rel) => lstatOrUndefined(path15.join(run.ctx.worktree, rel)) === void 0);
 }
 function addMarks(run, rels) {
   const dir = run.ctx.privateDir;
@@ -2991,37 +3069,17 @@ function logWrongVersion(run, expected, found) {
     silent: false
   });
 }
-function removeMarkedLeftovers(run) {
-  const dir = run.ctx.privateDir;
-  if (dir === void 0) {
+function clearProjectLeftovers(ctx, project, label) {
+  const removal = removeMarkedLeftovers(ctx, (rel) => markOwner(ctx.projectDirs, rel) === project.dir);
+  if (removal.ok) {
     return true;
   }
-  const marked = readPartialMarks(dir).filter((rel) => isInProject(run.project, rel));
-  const removed = [];
-  const failed = [];
-  let firstReason;
-  for (const rel of marked) {
-    const result = removeSafely(run.ctx.worktree, rel);
-    if (result.ok) {
-      removed.push(rel);
-    } else {
-      failed.push(rel);
-      firstReason ??= result.reason;
-    }
-  }
-  clearMarks(run, removed);
-  if (firstReason === void 0) {
-    return true;
-  }
-  const command = removalCommand(absolutePaths(run, failed));
-  run.ctx.deps.log.warn(
-    `not installed with ${run.label}: cannot remove the partial install of an earlier run: ${showText(firstReason)}; remove it with: ${showText(command)}`
-  );
+  ctx.deps.log.warn(`not installed with ${label}: ${removal.problem}`);
   return false;
 }
 function blockedTargets(run) {
   return run.targets.filter(
-    (rel) => lstatOrUndefined(path14.join(run.ctx.worktree, rel)) !== void 0 && !isOwnLink(run.ctx, rel)
+    (rel) => lstatOrUndefined(path15.join(run.ctx.worktree, rel)) !== void 0 && !isOwnLink(run.ctx, rel)
   );
 }
 function warnBlocked(run, blocked) {
@@ -3116,9 +3174,6 @@ async function reportFailure(run, result, before) {
 }
 async function installChecked(run, deadlineMs) {
   const { deps } = run.ctx;
-  if (!removeMarkedLeftovers(run)) {
-    return { kind: "not-installed" };
-  }
   const blocked = blockedTargets(run);
   if (blocked.length > 0) {
     warnBlocked(run, blocked);
@@ -3139,7 +3194,7 @@ async function installChecked(run, deadlineMs) {
     manager: run.manager,
     projectDir: projectPath(run),
     label: run.label,
-    lockFiles: run.project.lockNames.map((name) => path14.join(projectPath(run), name)),
+    lockFiles: run.project.lockNames.map((name) => path15.join(projectPath(run), name)),
     deadlineMs,
     nowMs: run.ctx.nowMs,
     networkTimeoutMs: run.ctx.networkTimeoutMs,
@@ -3153,23 +3208,18 @@ async function installChecked(run, deadlineMs) {
   await reportFailure(run, result, before);
   return { kind: "failed" };
 }
-async function installProject(ctx, project, deadlineMs, chosen) {
-  const projectDir = path14.join(ctx.worktree, project.dir);
-  const choice = chosen ?? chooseManager(projectDir, project.ecosystem, project.lockNames);
-  if (choice.kind === "conflict") {
-    const where = project.dir === "" ? "the worktree root" : showText(project.dir);
-    ctx.deps.log.warn(`cannot install dependencies in ${where}: ${showText(choice.reason)}`);
+async function installProject(ctx, project, deadlineMs, choice) {
+  const name = choice.kind === "conflict" ? CONFLICT_MANAGER : executableOf(choice.manager);
+  if (!clearProjectLeftovers(ctx, project, projectLabel(project, name))) {
     return { kind: "not-installed" };
   }
+  if (choice.kind === "conflict") {
+    ctx.deps.log.warn(`cannot install dependencies in ${projectPlace(project)}: ${showText(choice.reason)}`);
+    return { kind: "not-installed" };
+  }
+  const projectDir = path15.join(ctx.worktree, project.dir);
   const { manager } = choice;
-  const name = executableOf(manager);
-  const run = {
-    ctx,
-    project,
-    manager,
-    label: project.dir === "" ? name : `${name} in ${showText(project.dir)}`,
-    targets: targetFolders(project)
-  };
+  const run = { ctx, project, manager, label: projectLabel(project, name), targets: targetFolders(project) };
   const leftMs = deadlineMs - ctx.nowMs();
   if (leftMs <= 0) {
     logNoTimeLeft(run);
@@ -3191,25 +3241,27 @@ async function installProject(ctx, project, deadlineMs, chosen) {
   }
   return installChecked(run, deadlineMs);
 }
-var SHELL_SAFE, NO_PRIVATE_DIR;
+var CONFLICT_MANAGER, SHELL_SAFE, NO_PRIVATE_DIR;
 var init_installProject = __esm({
   "src/worktree-add/installProject.ts"() {
     "use strict";
     init_attempt();
     init_cleanup();
     init_failures();
+    init_leftovers();
     init_managers();
     init_mask();
     init_paths();
     init_privateArea();
     init_text();
+    CONFLICT_MANAGER = "the package manager";
     SHELL_SAFE = /^[\w./-]+$/u;
     NO_PRIVATE_DIR = "the worktree has no private git folder";
   }
 });
 
 // src/worktree-add/installStage.ts
-import path15 from "node:path";
+import path16 from "node:path";
 function shownList(rels) {
   return rels.map((rel) => showText(rel)).join(", ");
 }
@@ -3228,49 +3280,73 @@ function commandOf({ project, choice }) {
     command: projectCommand(project, installCommand(choice.manager))
   };
 }
-async function skipAll(request) {
-  const results = await applyFallback(request.deps, paths(request), request.transfer, request.depRels);
+function overlaps(a, b) {
+  return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+}
+async function skipAll(request, dir) {
+  const { deps, worktree } = request;
+  const removal = removeMarkedLeftovers({ deps, worktree, privateDir: dir }, () => true);
+  const failed = removal.ok ? [] : removal.failed;
+  if (!removal.ok) {
+    deps.log.warn(removal.problem);
+  }
+  const rels = request.depRels.filter((rel) => !failed.some((mark) => overlaps(rel, mark)));
+  const results = await applyFallback(deps, paths(request), request.transfer, rels);
   const groups = groupTexts(results, NO_INSTALL_GROUPS);
   const summary = groups.length === 0 ? "no dependency folders in the main clone" : groups.join("; ");
-  request.deps.log.info(`installs skipped (--no-install): ${summary}`);
+  deps.log.info(`installs skipped (--no-install): ${summary}`);
 }
-function projectPlace(project) {
-  return project.dir === "" ? "the worktree root" : showText(project.dir);
+function labelOf(plan) {
+  return projectLabel(plan.project, commandOf(plan).manager);
 }
 function reportManual(request, planned) {
   for (const plan of planned) {
-    const { project } = plan;
-    const { command } = commandOf(plan);
-    const run = `(run in the worktree: ${showText(command)})`;
-    if (!project.auto) {
-      request.deps.log.info(`not installed automatically: ${showText(project.dir)} ${run}`);
-      continue;
-    }
-    const where = projectPlace(project);
-    for (const folder of project.reportOnly) {
-      request.deps.log.info(
-        `not installed automatically: ${showText(folder)} belongs to the uv project in ${where} ${run}`
-      );
+    if (!plan.project.auto) {
+      const run = `(run in the worktree: ${showText(commandOf(plan).command)})`;
+      request.deps.log.info(`not installed automatically: ${showText(plan.project.dir)} ${run}`);
     }
   }
 }
-function reportSandbox(request, planned) {
-  const commands = planned.map((plan) => showText(commandOf(plan).command));
-  const tail = commands.length === 0 ? "" : `; run later in the worktree: ${commands.join("; ")}`;
-  request.deps.log.info(
-    `installs skipped: the network is disabled in this sandbox; dependency folders stay missing${tail}`
-  );
+async function sandboxFallback(stage, planned) {
+  const { request, ctx } = stage;
+  const results = [];
+  for (const plan of planned) {
+    if (clearProjectLeftovers(ctx, plan.project, labelOf(plan))) {
+      results.push(...await applyFallback(ctx.deps, paths(request), request.transfer, plan.project.depRels));
+    }
+  }
+  const done = groupTexts(results, NO_INSTALL_GROUPS).map((text) => `; ${text}`);
+  const commands = planned.map((plan) => showText(commandOf(plan).command)).join("; ");
+  const later = results.some((result) => result.kind === "linked") ? "to install later, remove the linked folders first (rm PATH, no trailing slash), then run in the worktree" : "run later in the worktree";
+  const tail = commands.length === 0 ? "" : `; ${later}: ${commands}`;
+  ctx.deps.log.info(`installs skipped: the network is disabled in this sandbox${done.join("")}${tail}`);
 }
 function orphanReason(rel) {
-  if (path15.posix.basename(rel) === JS_DEPS) {
+  if (path16.posix.basename(rel) === JS_DEPS) {
     return `${showText(rel)} belongs to no project with a supported lock file`;
   }
   return `${showText(rel)} is a Python environment with no uv.lock next to it, and poetry, pip and pipenv are not installed automatically`;
 }
+function kindText(result) {
+  if (result.kind === "no-parent") {
+    return `skipped: ${showText(path16.posix.dirname(result.rel))} does not exist in the worktree`;
+  }
+  return ORPHAN_KIND_TEXT[result.kind];
+}
 async function handleOrphans(request, orphans) {
   const results = await applyFallback(request.deps, paths(request), request.transfer, orphans);
   for (const result of results) {
-    request.deps.log.warn(`not installed: ${orphanReason(result.rel)}; ${ORPHAN_KIND_TEXT[result.kind]}`);
+    request.deps.log.warn(`not installed: ${orphanReason(result.rel)}; ${kindText(result)}`);
+  }
+}
+async function handleLinkOnly(request, planned) {
+  for (const { project } of planned) {
+    const results = await applyFallback(request.deps, paths(request), request.transfer, project.linkOnly);
+    for (const result of results) {
+      request.deps.log.warn(
+        `not installed: ${showText(result.rel)} belongs to the uv project in ${projectPlace(project)}, which installs only its own .venv; ${kindText(result)}`
+      );
+    }
   }
 }
 function toolMissingTail(project, results) {
@@ -3288,11 +3364,13 @@ async function handleToolMissing(request, project, manager) {
     `to install: install ${shown} (or enable corepack), then rerun from the main clone; ` + toolMissingTail(project, results)
   );
 }
-function reportNotStarted(request, plan) {
+function reportNotStarted(stage, plan) {
+  const { request, ctx } = stage;
   const { project } = plan;
+  clearProjectLeftovers(ctx, project, labelOf(plan));
   const { manager, command } = commandOf(plan);
   const missing = targetFolders(project).filter(
-    (rel) => lstatOrUndefined(path15.join(request.worktree, rel)) === void 0
+    (rel) => lstatOrUndefined(path16.join(request.worktree, rel)) === void 0
   );
   const lines = failureLines({
     manager,
@@ -3327,7 +3405,7 @@ async function installOne(request, run, { project, choice }, untilMs) {
   } catch (error) {
     deps.log.warn(`cannot install dependencies in ${projectPlace(project)}: ${messageOf(error)}`);
   }
-  if (run.snapshot !== void 0) {
+  if (run.snapshot !== void 0 && (outcome === void 0 || ranManager(outcome))) {
     try {
       await revertConfigChanges(deps, env, run.snapshot);
     } catch (error) {
@@ -3340,30 +3418,43 @@ async function installOne(request, run, { project, choice }, untilMs) {
     await handleToolMissing(request, project, outcome.manager);
   }
 }
-async function installAll(request, planned) {
+async function installAll(stage, planned) {
   if (planned.length === 0) {
     return;
   }
-  const { deps, env, timing, nowMs } = request;
-  const ctx = {
-    deps,
-    env,
-    main: request.main,
-    worktree: request.worktree,
-    privateDir: await privateDir(deps, request.worktree),
-    nowMs,
-    networkTimeoutMs: timing.networkTimeoutMs,
-    progressMs: timing.progressMs
-  };
+  const { request, ctx } = stage;
+  const { timing, nowMs } = request;
   const snapshot = await takeSnapshot(request);
   const deadline = createDeadline(request.startedMs, timing.phaseMs, nowMs);
   for (const [index, plan] of planned.entries()) {
     if (deadline.remainingMs() < MIN_START_MS) {
-      reportNotStarted(request, plan);
+      reportNotStarted(stage, plan);
       continue;
     }
     await installOne(request, { ctx, snapshot }, plan, nowMs() + deadline.shareMs(planned.length - index));
   }
+}
+async function excludeNewTargets(request, planned) {
+  const known = new Set(request.depRels);
+  const fresh = planned.flatMap((plan) => targetFolders(plan.project)).filter((rel) => !known.has(rel));
+  await addExcludePatterns(
+    request.deps,
+    request.worktree,
+    fresh.map((rel) => anchoredPattern(rel))
+  );
+}
+function stageContext(request, dir, projectDirs) {
+  return {
+    deps: request.deps,
+    env: request.env,
+    main: request.main,
+    worktree: request.worktree,
+    privateDir: dir,
+    projectDirs,
+    nowMs: request.nowMs,
+    networkTimeoutMs: request.timing.networkTimeoutMs,
+    progressMs: request.timing.progressMs
+  };
 }
 async function runInstallStage(request) {
   const { deps, worktree, depRels } = request;
@@ -3372,11 +3463,13 @@ async function runInstallStage(request) {
     worktree,
     depRels.map((rel) => anchoredPattern(rel))
   );
+  const dir = await privateDir(deps, worktree);
   if (request.noInstall) {
-    await skipAll(request);
+    await skipAll(request, dir);
     return;
   }
-  const found = await discoverProjects(deps, worktree);
+  const specs = /* @__PURE__ */ new Map();
+  const found = await discoverProjects(deps, worktree, specs);
   if (found === void 0) {
     deps.log.warn("cannot list the lock files of the worktree; no dependencies installed");
     return;
@@ -3384,22 +3477,32 @@ async function runInstallStage(request) {
   const assignment = assignDependencies(
     found,
     depRels,
-    (project, folder) => isWorkspaceMember(worktree, project, folder)
+    (project, folder) => isWorkspaceMember(worktree, project, folder, specs)
   );
   const planned = assignment.projects.map((project) => ({
     project,
-    choice: chooseManager(path15.join(worktree, project.dir), project.ecosystem, project.lockNames)
+    choice: chooseManager(path16.join(worktree, project.dir), project.ecosystem, project.lockNames)
   }));
+  const stage = {
+    request,
+    ctx: stageContext(
+      request,
+      dir,
+      found.map((project) => project.dir)
+    )
+  };
   reportManual(request, planned);
   const autoProjects = planned.filter((plan) => plan.project.auto);
   await handleOrphans(request, assignment.orphans);
+  await handleLinkOnly(request, autoProjects);
   if (request.env[SANDBOX_NETWORK_VARIABLE] === "1") {
-    reportSandbox(request, autoProjects);
+    await sandboxFallback(stage, autoProjects);
     return;
   }
-  await installAll(request, autoProjects);
+  await excludeNewTargets(request, autoProjects);
+  await installAll(stage, autoProjects);
 }
-var DEFAULT_TIMING, SANDBOX_NETWORK_VARIABLE, CONFLICT_COMMAND, CONFLICT_MANAGER, NOT_STARTED, NO_INSTALL_GROUPS, TOOL_MISSING_GROUPS, ORPHAN_KIND_TEXT;
+var DEFAULT_TIMING, SANDBOX_NETWORK_VARIABLE, CONFLICT_COMMAND, NOT_STARTED, NO_INSTALL_GROUPS, TOOL_MISSING_GROUPS, ORPHAN_KIND_TEXT;
 var init_installStage = __esm({
   "src/worktree-add/installStage.ts"() {
     "use strict";
@@ -3412,6 +3515,7 @@ var init_installStage = __esm({
     init_failures();
     init_fallback();
     init_installProject();
+    init_leftovers();
     init_managers();
     init_paths();
     init_privateArea();
@@ -3423,18 +3527,19 @@ var init_installStage = __esm({
     };
     SANDBOX_NETWORK_VARIABLE = "CODEX_SANDBOX_NETWORK_DISABLED";
     CONFLICT_COMMAND = "install with the project's package manager";
-    CONFLICT_MANAGER = "the package manager";
     NOT_STARTED = "the install phase ended before it started";
     NO_INSTALL_GROUPS = [
       ["cloned", (shown) => `cloned ${shown}`],
       ["linked", (shown) => `linked ${shown}`],
       ["present", (shown) => `left as it is ${shown}`],
+      ["no-parent", (shown) => `skipped ${shown} (the parent folder does not exist in the worktree)`],
       ["failed", (shown) => `failed ${shown}`]
     ];
     TOOL_MISSING_GROUPS = [
       ["linked", (shown) => `linked ${shown} meanwhile`],
       ["cloned", (shown) => `cloned ${shown} meanwhile`],
       ["present", (shown) => `${shown} already stand in the worktree and are left as they are`],
+      ["no-parent", (shown) => `skipped ${shown}: the parent folder does not exist in the worktree`],
       ["failed", (shown) => `${shown} stay missing`]
     ];
     ORPHAN_KIND_TEXT = {
@@ -3447,7 +3552,7 @@ var init_installStage = __esm({
 });
 
 // src/worktree-add/repo.ts
-import path16 from "node:path";
+import path17 from "node:path";
 function gitIn(deps, dir, args) {
   return deps.runner.run({ file: "git", args: ["-C", dir, ...args] });
 }
@@ -3464,7 +3569,7 @@ function failureLine3(result) {
 async function canonicalDir(deps, dir, flag) {
   const result = await gitIn(deps, dir, ["rev-parse", flag]);
   const value = withoutFinalNewline(result.stdout);
-  return result.code === 0 && value.length > 0 ? canonical(path16.resolve(dir, value)) : void 0;
+  return result.code === 0 && value.length > 0 ? canonical(path17.resolve(dir, value)) : void 0;
 }
 async function gitDirsOf(deps, dir) {
   const gitDir = await canonicalDir(deps, dir, "--absolute-git-dir");
@@ -3545,7 +3650,7 @@ var init_repo = __esm({
 });
 
 // src/worktree-add/start.ts
-import path17 from "node:path";
+import path18 from "node:path";
 function git3(deps, dir, args) {
   return deps.runner.run({ file: "git", args: ["-C", dir, ...args] });
 }
@@ -3665,7 +3770,7 @@ async function logSameTicket(deps, main2, suffix, target) {
   }
   const entries = await listWorktrees(deps, main2);
   const others = (entries ?? []).filter(
-    (entry) => !matchesTarget(entry.path, target) && namesTicket(path17.basename(entry.path), key)
+    (entry) => !matchesTarget(entry.path, target) && namesTicket(path18.basename(entry.path), key)
   );
   if (others.length === 0) {
     return;
@@ -3689,10 +3794,9 @@ var init_start = __esm({
 });
 
 // src/worktree-add/sync.ts
-import fs15 from "node:fs";
-import path18 from "node:path";
+import path19 from "node:path";
 function classify(rel) {
-  const name = path18.posix.basename(rel);
+  const name = path19.posix.basename(rel);
   if (COPY_NAMES.has(name) || name.startsWith(COPY_PREFIX)) {
     return "copy";
   }
@@ -3705,8 +3809,8 @@ function classify(rel) {
   return "link";
 }
 function isVenvFolder(main2, rel) {
-  const folder = path18.join(main2, rel);
-  return lstatOrUndefined(folder)?.isDirectory() === true && lstatOrUndefined(path18.join(folder, VENV_MARKER)) !== void 0;
+  const folder = path19.join(main2, rel);
+  return lstatOrUndefined(folder)?.isDirectory() === true && lstatOrUndefined(path19.join(folder, VENV_MARKER)) !== void 0;
 }
 function entryClass(main2, rel) {
   const kind = classify(rel);
@@ -3736,26 +3840,10 @@ function usableEntries(deps, rels) {
   return kept;
 }
 function destinationOpen2(run, rel, kind) {
-  if (lstatOrUndefined(path18.join(run.worktree, rel)) === void 0) {
+  if (lstatOrUndefined(path19.join(run.worktree, rel)) === void 0) {
     return true;
   }
   return kind !== "link" && isOwnLink(run, rel);
-}
-function linkMissing(run, rel) {
-  const dest = path18.join(run.worktree, rel);
-  if (lstatOrUndefined(dest) !== void 0) {
-    return false;
-  }
-  try {
-    fs15.symlinkSync(path18.join(run.main, rel), dest);
-    return true;
-  } catch (error) {
-    const code = errorCode(error);
-    if (code !== "EEXIST") {
-      run.deps.log.warn(`cannot link ${showText(rel)} into the worktree: ${showText(code)}`);
-    }
-    return false;
-  }
 }
 async function syncEntry(run, rel, kind) {
   if (kind === "skip" || kind === "dep" || !parentInside(run.worktree, rel) || !destinationOpen2(run, rel, kind)) {
@@ -3767,7 +3855,7 @@ async function syncEntry(run, rel, kind) {
       return;
     }
     case "link": {
-      if (linkMissing(run, rel)) {
+      if (makeLink(run, rel) === "created") {
         run.linked.push(rel);
       }
       return;
@@ -3807,11 +3895,12 @@ var init_sync = __esm({
   "src/worktree-add/sync.ts"() {
     "use strict";
     init_exclude();
+    init_fallback();
     init_paths();
     init_text();
     COPY_NAMES = /* @__PURE__ */ new Set([".env", "CLAUDE.local.md", "temp.local"]);
     COPY_PREFIX = ".env.";
-    DEPENDENCY_NAMES = /* @__PURE__ */ new Set([JS_DEPS, UV_VENV, "venv"]);
+    DEPENDENCY_NAMES = /* @__PURE__ */ new Set([JS_DEPS]);
     VENV_MARKER = "pyvenv.cfg";
     SKIP_NAMES = /* @__PURE__ */ new Set([
       ".cache",
@@ -3829,12 +3918,12 @@ var init_sync = __esm({
 });
 
 // src/worktree-add/target.ts
-import path19 from "node:path";
+import path20 from "node:path";
 function joinedRaw(cwd, parentArg) {
-  return path19.isAbsolute(parentArg) ? parentArg : `${cwd}/${parentArg}`;
+  return path20.isAbsolute(parentArg) ? parentArg : `${cwd}/${parentArg}`;
 }
 function deriveTarget(suffix, parentArg, cwd, main2) {
-  const mainName = path19.basename(main2);
+  const mainName = path20.basename(main2);
   if (hasControlCharacter(mainName)) {
     return {
       ok: false,
@@ -3842,7 +3931,7 @@ function deriveTarget(suffix, parentArg, cwd, main2) {
       message: `the main folder name contains a control character: ${showText(main2)}`
     };
   }
-  const parent = canonicalLoose(parentArg === void 0 ? path19.dirname(main2) : joinedRaw(cwd, parentArg));
+  const parent = canonicalLoose(parentArg === void 0 ? path20.dirname(main2) : joinedRaw(cwd, parentArg));
   const stats = lstatOrUndefined(parent);
   if (stats !== void 0 && !stats.isDirectory()) {
     return {
@@ -3860,7 +3949,7 @@ function deriveTarget(suffix, parentArg, cwd, main2) {
       branch: suffix,
       parent,
       parentMissing: stats === void 0,
-      path: path19.join(parent, name)
+      path: path20.join(parent, name)
     }
   };
 }
@@ -3873,7 +3962,7 @@ var init_target = __esm({
 });
 
 // src/worktree-add/transfer.ts
-import path20 from "node:path";
+import path21 from "node:path";
 function seconds(startedMs, endedMs) {
   return ((endedMs - startedMs) / 1e3).toFixed(1);
 }
@@ -3897,11 +3986,11 @@ function createTransfer(deps, options) {
   const { main: main2, worktree, gate } = options;
   const nowMs = options.nowMs ?? (() => Date.now());
   const placementOf = (rel) => ({
-    source: path20.join(main2, rel),
-    dest: path20.join(worktree, rel)
+    source: path21.join(main2, rel),
+    dest: path21.join(worktree, rel)
   });
   const sweep = (placement) => {
-    sweepDeadTemps(path20.dirname(placement.dest), pidAlive, deps.pid);
+    sweepDeadTemps(path21.dirname(placement.dest), pidAlive, deps.pid);
   };
   return {
     async copyEntry(rel) {
@@ -3957,7 +4046,7 @@ var init_transfer = __esm({
 
 // src/worktree-add/command.ts
 import os from "node:os";
-import path21 from "node:path";
+import path22 from "node:path";
 function refused(reason) {
   return { kind: "refused", reason };
 }
@@ -4047,7 +4136,7 @@ async function prepareTarget(io, repo, suffix, parent) {
     return { ok: false, outcome: derived.code === 2 ? usage2(derived.message) : refused(derived.message) };
   }
   const { target } = derived;
-  deps.log.info(`name based on main clone folder ${showText(path21.basename(repo.main))}`);
+  deps.log.info(`name based on main clone folder ${showText(path22.basename(repo.main))}`);
   const name = await checkBranchName(deps, repo.current, target.branch);
   if (name === "invalid") {
     return { ok: false, outcome: usage2(`invalid branch name: ${showText(target.branch)}`) };
@@ -4116,10 +4205,10 @@ var init_command = __esm({
 });
 
 // src/worktree-add/temps.ts
-import fs16 from "node:fs";
+import fs15 from "node:fs";
 function removeQuietly3(file) {
   try {
-    fs16.rmSync(file, { recursive: true, force: true });
+    fs15.rmSync(file, { recursive: true, force: true });
   } catch {
     return;
   }
@@ -4152,7 +4241,7 @@ var main_exports = {};
 __export(main_exports, {
   main: () => main
 });
-import fs17 from "node:fs";
+import fs16 from "node:fs";
 function stoppable(inner) {
   let stopped = false;
   return {
@@ -4192,12 +4281,12 @@ function installSignalCleanup(deps, runner) {
   return uninstall;
 }
 function writeStderr(text) {
-  fs17.writeSync(2, text);
+  fs16.writeSync(2, text);
 }
 function report(deps, outcome) {
   switch (outcome.kind) {
     case "ok": {
-      fs17.writeSync(1, `${outcome.path}
+      fs16.writeSync(1, `${outcome.path}
 `);
       return 0;
     }

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { isLinkWithText, lstatOrUndefined } from './paths.ts';
+import { errorCode, isLinkWithText, lstatOrUndefined } from './paths.ts';
 import { showText } from './text.ts';
 import type { CommandResult, Deps } from './types.ts';
 
@@ -19,10 +19,6 @@ export interface PlaceRequest {
 export type PlaceResult = { ok: true } | { ok: false; reason: string };
 
 type Rename = (_from: string, _to: string) => void;
-
-function errorCode(error: unknown): string {
-    return error instanceof Error && 'code' in error && typeof error.code === 'string' ? error.code : 'unknown';
-}
 
 // Best effort: a temp that cannot be removed now is left for the next dead-PID sweep.
 function removeQuietly(file: string): void {

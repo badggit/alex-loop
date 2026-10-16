@@ -97,3 +97,8 @@ export function parentInside(root: string, rel: string): boolean {
     const parent = realOrUndefined(path.dirname(path.join(root, rel)));
     return realRoot !== undefined && parent === path.join(realRoot, path.dirname(rel));
 }
+
+// False when the folder that would hold REL is missing (or reached through a broken link), so REL cannot exist.
+export function parentExists(root: string, rel: string): boolean {
+    return realOrUndefined(path.dirname(path.join(root, rel))) !== undefined;
+}

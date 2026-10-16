@@ -11,6 +11,7 @@ import {
     type InstallStageRequest,
     type InstallTiming,
 } from '../../src/worktree-add/installStage.ts';
+import { PARTIAL_MARKER, readPartialMarks } from '../../src/worktree-add/privateArea.ts';
 import { createProcessRunner } from '../../src/worktree-add/proc.ts';
 import { createTransfer } from '../../src/worktree-add/transfer.ts';
 import type { CommandRequest, CommandRunner, Env } from '../../src/worktree-add/types.ts';
@@ -146,6 +147,10 @@ function assertOwnLink(fixture: Fixture, rel: string): void {
 
 function sharedExclude(fixture: Fixture): string {
     return fs.readFileSync(path.join(fixture.main, '.git', 'info', 'exclude'), 'utf8');
+}
+
+function gitDirOf(fixture: Fixture): string {
+    return path.join(fixture.main, '.git', 'worktrees', path.basename(fixture.worktree));
 }
 
 function sharedConfig(fixture: Fixture): string {
@@ -286,21 +291,71 @@ await test('a root npm project and a uv project install in order; a project with
     assert.ok(exclude.has('/services/api/.venv'));
 });
 
-await test('a reportOnly Python environment gets the not-automatic line with its uv project', async (t) => {
+await test('a Python environment of a uv project other than its .venv is linked with its line', async (t) => {
     const fixture = makeFixture(t, {
-        files: { ...ROOT_NPM, 'services/api/uv.lock': 'version = 1\n' },
+        files: { ...ROOT_NPM, 'services/api/uv.lock': 'version = 1\n', 'services/api/tools/README.md': 'tools\n' },
         stubs: { npm: NPM_STUB, uv: UV_STUB },
         mainFolders: ['services/api/tools/env'],
         depRels: ['services/api/tools/env'],
     });
     await runInstallStage(fixture.request);
+    assertOwnLink(fixture, 'services/api/tools/env');
+    assert.deepEqual(warnings(fixture), [
+        'not installed: services/api/tools/env belongs to the uv project in services/api, ' +
+            'which installs only its own .venv; linked it; do not run installs in this worktree until the link is removed',
+    ]);
     assert.ok(
-        infos(fixture).includes(
-            'not installed automatically: services/api/tools/env belongs to the uv project in services/api ' +
-                '(run in the worktree: cd services/api && uv sync --frozen)'
-        ),
+        infos(fixture).some((line) => line.startsWith('installed dependencies with uv in services/api in ')),
         dump(fixture)
     );
+});
+
+await test('a dependency folder whose parent folder is missing in the worktree is skipped, not left as it is', async (t) => {
+    const fixture = makeFixture(t, {
+        files: { ...ROOT_NPM, 'services/api/uv.lock': 'version = 1\n' },
+        stubs: { npm: NPM_STUB, uv: UV_STUB },
+        mainFolders: ['services/api/tools/env', 'tools/x/node_modules'],
+        depRels: ['services/api/tools/env', 'tools/x/node_modules'],
+    });
+    await runInstallStage(fixture.request);
+    assert.deepEqual(warnings(fixture), [
+        'not installed: tools/x/node_modules belongs to no project with a supported lock file; ' +
+            'skipped: tools/x does not exist in the worktree',
+        'not installed: services/api/tools/env belongs to the uv project in services/api, ' +
+            'which installs only its own .venv; skipped: services/api/tools does not exist in the worktree',
+    ]);
+    assert.equal(fs.existsSync(path.join(fixture.worktree, 'tools')), false);
+});
+
+await test('--no-install skips a dependency folder whose parent folder is missing', async (t) => {
+    const fixture = makeFixture(t, {
+        files: ROOT_NPM,
+        stubs: { npm: NPM_STUB },
+        mainFolders: ['node_modules', 'tools/x/node_modules'],
+        depRels: ['node_modules', 'tools/x/node_modules'],
+        noInstall: true,
+    });
+    await runInstallStage(fixture.request);
+    assert.deepEqual(infos(fixture), [
+        'installs skipped (--no-install): linked node_modules; ' +
+            'skipped tools/x/node_modules (the parent folder does not exist in the worktree)',
+    ]);
+});
+
+await test('--no-install removes a marked half-installed folder before linking it', async (t) => {
+    const fixture = makeFixture(t, {
+        files: ROOT_NPM,
+        stubs: { npm: NPM_STUB },
+        mainFolders: ['node_modules'],
+        depRels: ['node_modules'],
+        noInstall: true,
+    });
+    fs.mkdirSync(path.join(fixture.worktree, 'node_modules', 'half'), { recursive: true });
+    fs.writeFileSync(path.join(gitDirOf(fixture), PARTIAL_MARKER), 'node_modules\n');
+    await runInstallStage(fixture.request);
+    assertOwnLink(fixture, 'node_modules');
+    assert.deepEqual(infos(fixture), ['installs skipped (--no-install): linked node_modules']);
+    assert.deepEqual(readPartialMarks(gitDirOf(fixture)), []);
 });
 
 await test('--no-install links the dependency folders and calls no manager', async (t) => {
@@ -345,7 +400,7 @@ await test('--no-install leaves a foreign entry at the destination as it is', as
     assert.equal(fs.readFileSync(path.join(fixture.worktree, 'node_modules'), 'utf8'), 'own\n');
 });
 
-await test('a disabled sandbox network skips installs, links orphans and names the project commands', async (t) => {
+await test('a disabled sandbox network skips installs, links every folder and names the project commands', async (t) => {
     const fixture = makeFixture(t, {
         files: { ...ROOT_NPM, 'services/api/uv.lock': 'version = 1\n' },
         stubs: { npm: NPM_STUB, uv: UV_STUB },
@@ -355,14 +410,13 @@ await test('a disabled sandbox network skips installs, links orphans and names t
     });
     await runInstallStage(fixture.request);
     assert.deepEqual(managerCalls(fixture), []);
-    for (const rel of ['node_modules', 'services/api/.venv']) {
-        assert.equal(fs.existsSync(path.join(fixture.worktree, rel)), false, rel);
-        assert.equal(linkText(path.join(fixture.worktree, rel)), undefined, rel);
+    for (const rel of ['node_modules', 'services/api/.venv', '.venv']) {
+        assertOwnLink(fixture, rel);
     }
-    assertOwnLink(fixture, '.venv');
     assert.deepEqual(infos(fixture), [
-        'installs skipped: the network is disabled in this sandbox; dependency folders stay missing; ' +
-            'run later in the worktree: npm ci; cd services/api && uv sync --frozen',
+        'installs skipped: the network is disabled in this sandbox; linked node_modules, services/api/.venv; ' +
+            'to install later, remove the linked folders first (rm PATH, no trailing slash), then run in the worktree: ' +
+            'npm ci; cd services/api && uv sync --frozen',
     ]);
     const orphan = warnings(fixture);
     assert.equal(orphan.length, 1, dump(fixture));
@@ -382,10 +436,25 @@ await test('a disabled sandbox network with only an orphan names no command', as
     assert.deepEqual(managerCalls(fixture), []);
     assertOwnLink(fixture, 'node_modules');
     assert.deepEqual(infos(fixture), [
-        'installs skipped: the network is disabled in this sandbox; dependency folders stay missing; ' +
-            'run later in the worktree: uv sync --frozen',
+        'installs skipped: the network is disabled in this sandbox; run later in the worktree: uv sync --frozen',
     ]);
     assert.equal(warnings(fixture).filter((line) => line.includes('node_modules')).length, 1, dump(fixture));
+});
+
+await test('a disabled sandbox network removes a marked half-installed folder before linking it', async (t) => {
+    const fixture = makeFixture(t, {
+        files: ROOT_NPM,
+        stubs: { npm: NPM_STUB },
+        mainFolders: ['node_modules'],
+        depRels: ['node_modules'],
+        extraEnv: { [SANDBOX_NETWORK_VARIABLE]: '1' },
+    });
+    fs.mkdirSync(path.join(fixture.worktree, 'node_modules', 'half'), { recursive: true });
+    fs.writeFileSync(path.join(gitDirOf(fixture), PARTIAL_MARKER), 'node_modules\n');
+    await runInstallStage(fixture.request);
+    assertOwnLink(fixture, 'node_modules');
+    assert.deepEqual(readPartialMarks(gitDirOf(fixture)), []);
+    assert.deepEqual(warnings(fixture), []);
 });
 
 await test('--no-install wins over the sandbox switch', async (t) => {
@@ -426,6 +495,26 @@ await test('a missing pnpm links node_modules and an orphan venv is linked with 
     assert.match(orphan[0] ?? '', /poetry, pip and pipenv are not installed automatically/u);
     assert.match(orphan[0] ?? '', /linked it; do not run installs in this worktree until the link is removed$/u);
     assert.equal(sharedExclude(fixture).split('\n').includes('/.venv'), true);
+});
+
+await test('a missing pnpm removes a marked half-installed folder before linking it', async (t) => {
+    const fixture = makeFixture(t, {
+        files: { 'package.json': '{"name":"demo"}\n', 'pnpm-lock.yaml': PNPM_LOCK },
+        stubs: {},
+        mainFolders: ['node_modules'],
+        depRels: ['node_modules'],
+    });
+    fs.mkdirSync(path.join(fixture.worktree, 'node_modules', 'half'), { recursive: true });
+    fs.writeFileSync(path.join(gitDirOf(fixture), PARTIAL_MARKER), 'node_modules\n');
+    await runInstallStage(fixture.request);
+    assertOwnLink(fixture, 'node_modules');
+    assert.ok(
+        warnings(fixture).includes(
+            'to install: install pnpm (or enable corepack), then rerun from the main clone; linked node_modules meanwhile'
+        ),
+        dump(fixture)
+    );
+    assert.deepEqual(readPartialMarks(gitDirOf(fixture)), []);
 });
 
 await test('an orphan node_modules is linked with its reason', async (t) => {
@@ -669,6 +758,36 @@ await test('a nested node_modules of a workspace member belongs to the root inst
         ),
         dump(fixture)
     );
+});
+
+await test('a project that runs no manager gets no config revert', async (t) => {
+    const fixture = makeFixture(t, {
+        files: { ...ROOT_NPM, 'yarn.lock': YARN_LOCK },
+        stubs: { npm: NPM_STUB, yarn: YARN_STUB },
+        mainFolders: [],
+        depRels: [],
+    });
+    await runInstallStage(fixture.request);
+    assert.ok(
+        warnings(fixture).some((line) => line.startsWith('cannot install dependencies in the worktree root: ')),
+        dump(fixture)
+    );
+    const configReads = fixture.calls.filter((call) => call.args[0] === 'config' && call.args.includes('--list'));
+    assert.equal(configReads.length, 1, dump(fixture));
+});
+
+await test('a node_modules the main clone lacks gets an exclude pattern and stays out of git status', async (t) => {
+    const fixture = makeFixture(t, {
+        files: ROOT_NPM,
+        stubs: { npm: NPM_STUB },
+        mainFolders: [],
+        depRels: [],
+    });
+    await runInstallStage(fixture.request);
+    assert.ok(fs.statSync(path.join(fixture.worktree, 'node_modules')).isDirectory(), dump(fixture));
+    assert.ok(sharedExclude(fixture).split('\n').includes('/node_modules'));
+    const status = gitSync(testEnv(fixture.root), ['-C', fixture.worktree, 'status', '--porcelain']);
+    assert.equal(status, '');
 });
 
 await test('a config change made by a failed install is reverted too', async (t) => {

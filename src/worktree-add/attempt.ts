@@ -119,7 +119,8 @@ const COMMANDS: Readonly<Record<ManagerName, ManagerCommands>> = {
         file: 'uv',
         shown: 'uv sync --frozen',
         offline: ['sync', '--frozen', '--offline'],
-        offlineMissSignals: ['not found in the cache', 'Network connectivity is disabled'],
+        // The last one is uv's hint when the project's Python must be downloaded, which offline mode forbids.
+        offlineMissSignals: ['not found in the cache', 'Network connectivity is disabled', 'uv is set to offline mode'],
         online: () => ['sync', '--frozen'],
         env: UV_OWN_ENV,
         onlineEnv: uvEnv,

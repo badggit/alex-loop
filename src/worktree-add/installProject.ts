@@ -4,16 +4,11 @@ import type { AssignedProject } from './assign.ts';
 import { installCommand, runInstall, type AttemptResult } from './attempt.ts';
 import { removalCommand, removeNewEntries, removeSafely, shellQuote, untrackedEntries } from './cleanup.ts';
 import { classifyFailure, failureLines, keyErrorLines, lastLifecycleStep, type FailureReport } from './failures.ts';
-import {
-    checkManagerVersion,
-    chooseManager,
-    executableOf,
-    VERSION_TIMEOUT_MS,
-    type ManagerChoice,
-} from './managers.ts';
+import { markOwner, removeMarkedLeftovers } from './leftovers.ts';
+import { checkManagerVersion, executableOf, VERSION_TIMEOUT_MS, type ManagerChoice } from './managers.ts';
 import { maskSecrets } from './mask.ts';
 import { isOwnLink, JS_DEPS, lstatOrUndefined, UV_VENV } from './paths.ts';
-import { addPartialMarks, clearPartialMarks, logFileName, readPartialMarks, writeInstallLog } from './privateArea.ts';
+import { addPartialMarks, clearPartialMarks, logFileName, writeInstallLog } from './privateArea.ts';
 import { showText } from './text.ts';
 import type { Deps, Env, ManagerName } from './types.ts';
 
@@ -23,6 +18,8 @@ export interface ProjectContext {
     main: string;
     worktree: string;
     privateDir: string | undefined;
+    // Folders of every discovered project; a marked leftover belongs to the deepest one above it.
+    projectDirs: readonly string[];
     nowMs: () => number;
     networkTimeoutMs: number;
     progressMs: number;
@@ -30,6 +27,11 @@ export interface ProjectContext {
 
 export type ProjectOutcome =
     { kind: 'installed' } | { kind: 'failed' } | { kind: 'not-installed' } | { kind: 'tool-missing'; manager: string };
+
+// Only these outcomes come after a manager command ran (installed or failed); the others stop before it.
+export function ranManager(outcome: ProjectOutcome): boolean {
+    return outcome.kind === 'installed' || outcome.kind === 'failed';
+}
 
 interface Run {
     ctx: ProjectContext;
@@ -40,12 +42,26 @@ interface Run {
     targets: readonly string[];
 }
 
+export const CONFLICT_MANAGER = 'the package manager';
+
 const SHELL_SAFE = /^[\w./-]+$/u;
 const NO_PRIVATE_DIR = 'the worktree has no private git folder';
 
+function worktreeRel(project: AssignedProject, rel: string): string {
+    return project.dir === '' ? rel : `${project.dir}/${rel}`;
+}
+
 function defaultFolder(project: AssignedProject): string {
-    const name = project.ecosystem === 'js' ? JS_DEPS : UV_VENV;
-    return project.dir === '' ? name : `${project.dir}/${name}`;
+    return worktreeRel(project, project.ecosystem === 'js' ? JS_DEPS : UV_VENV);
+}
+
+export function projectPlace(project: AssignedProject): string {
+    return project.dir === '' ? 'the worktree root' : showText(project.dir);
+}
+
+// npm, or npm in services/api
+export function projectLabel(project: AssignedProject, manager: string): string {
+    return project.dir === '' ? manager : `${manager} in ${showText(project.dir)}`;
 }
 
 export function targetFolders(project: AssignedProject): string[] {
@@ -62,14 +78,6 @@ export function projectCommand(project: AssignedProject, command: string): strin
 
 function projectPath(run: Run): string {
     return path.join(run.ctx.worktree, run.project.dir);
-}
-
-function worktreeRel(project: AssignedProject, rel: string): string {
-    return project.dir === '' ? rel : `${project.dir}/${rel}`;
-}
-
-function isInProject(project: AssignedProject, rel: string): boolean {
-    return project.dir === '' || rel === project.dir || rel.startsWith(`${project.dir}/`);
 }
 
 function absolutePaths(run: Run, rels: readonly string[]): string[] {
@@ -129,34 +137,15 @@ function logWrongVersion(run: Run, expected: string, found: string): void {
     });
 }
 
-// Marked paths of this project are what an earlier run could not clean up; they go before anything is checked.
-function removeMarkedLeftovers(run: Run): boolean {
-    const dir = run.ctx.privateDir;
-    if (dir === undefined) {
+// Marked paths owned by this project are what an earlier run could not clean up. They go before anything else is
+// checked or linked, so a half-installed folder is never kept as if it were complete; false (with a warning naming
+// LABEL) when one cannot be removed.
+export function clearProjectLeftovers(ctx: ProjectContext, project: AssignedProject, label: string): boolean {
+    const removal = removeMarkedLeftovers(ctx, (rel) => markOwner(ctx.projectDirs, rel) === project.dir);
+    if (removal.ok) {
         return true;
     }
-    const marked = readPartialMarks(dir).filter((rel) => isInProject(run.project, rel));
-    const removed: string[] = [];
-    const failed: string[] = [];
-    let firstReason: string | undefined;
-    for (const rel of marked) {
-        const result = removeSafely(run.ctx.worktree, rel);
-        if (result.ok) {
-            removed.push(rel);
-        } else {
-            failed.push(rel);
-            firstReason ??= result.reason;
-        }
-    }
-    clearMarks(run, removed);
-    if (firstReason === undefined) {
-        return true;
-    }
-    const command = removalCommand(absolutePaths(run, failed));
-    run.ctx.deps.log.warn(
-        `not installed with ${run.label}: cannot remove the partial install of an earlier run: ` +
-            `${showText(firstReason)}; remove it with: ${showText(command)}`
-    );
+    ctx.deps.log.warn(`not installed with ${label}: ${removal.problem}`);
     return false;
 }
 
@@ -272,12 +261,9 @@ async function reportFailure(run: Run, result: AttemptResult, before: ReadonlySe
     });
 }
 
-// Steps 3 to 9 of the install order: leftovers, folder state, own links, recorded entries, the install itself.
+// Steps 4 to 9 of the install order: folder state, own links, recorded entries, the install itself.
 async function installChecked(run: Run, deadlineMs: number): Promise<ProjectOutcome> {
     const { deps } = run.ctx;
-    if (!removeMarkedLeftovers(run)) {
-        return { kind: 'not-installed' };
-    }
     const blocked = blockedTargets(run);
     if (blocked.length > 0) {
         warnBlocked(run, blocked);
@@ -313,30 +299,26 @@ async function installChecked(run: Run, deadlineMs: number): Promise<ProjectOutc
     return { kind: 'failed' };
 }
 
-// Installs one project from its own lock files; every problem is logged here except a missing tool, which the
-// stage reports together with its fallback. The stage passes the manager it already chose for its report lines.
+// Installs one project from its own lock files with the manager the stage chose for its report lines; every
+// problem is logged here except a missing tool, which the stage reports together with its fallback. Leftovers of an
+// earlier run go first on every path, also when the install does not run.
 export async function installProject(
     ctx: ProjectContext,
     project: AssignedProject,
     deadlineMs: number,
-    chosen?: ManagerChoice
+    choice: ManagerChoice
 ): Promise<ProjectOutcome> {
-    const projectDir = path.join(ctx.worktree, project.dir);
-    const choice = chosen ?? chooseManager(projectDir, project.ecosystem, project.lockNames);
-    if (choice.kind === 'conflict') {
-        const where = project.dir === '' ? 'the worktree root' : showText(project.dir);
-        ctx.deps.log.warn(`cannot install dependencies in ${where}: ${showText(choice.reason)}`);
+    const name = choice.kind === 'conflict' ? CONFLICT_MANAGER : executableOf(choice.manager);
+    if (!clearProjectLeftovers(ctx, project, projectLabel(project, name))) {
         return { kind: 'not-installed' };
     }
+    if (choice.kind === 'conflict') {
+        ctx.deps.log.warn(`cannot install dependencies in ${projectPlace(project)}: ${showText(choice.reason)}`);
+        return { kind: 'not-installed' };
+    }
+    const projectDir = path.join(ctx.worktree, project.dir);
     const { manager } = choice;
-    const name = executableOf(manager);
-    const run: Run = {
-        ctx,
-        project,
-        manager,
-        label: project.dir === '' ? name : `${name} in ${showText(project.dir)}`,
-        targets: targetFolders(project),
-    };
+    const run: Run = { ctx, project, manager, label: projectLabel(project, name), targets: targetFolders(project) };
     const leftMs = deadlineMs - ctx.nowMs();
     if (leftMs <= 0) {
         logNoTimeLeft(run);

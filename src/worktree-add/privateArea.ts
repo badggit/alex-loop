@@ -8,7 +8,7 @@ export const PARTIAL_MARKER = 'alex-loop-partial-install';
 
 const LOG_PREFIX = 'alex-loop-install';
 const LOG_MODE = 0o600;
-const UNSAFE_NAME_CHARACTER = /[^\w.-]/gu;
+const SAFE_NAME_CHARACTER = /^[\w.-]$/u;
 
 export type LogWriteResult = { ok: true; path: string } | { ok: false; reason: string };
 
@@ -22,8 +22,19 @@ export async function privateDir(deps: Deps, worktree: string): Promise<string |
     return dir;
 }
 
+// Percent-encodes every other byte ('%' and '/' included), so two different folders never share a log name.
 function nameSafe(text: string): string {
-    return text.replaceAll('/', '-').replaceAll(UNSAFE_NAME_CHARACTER, '_');
+    let result = '';
+    for (const char of text) {
+        if (SAFE_NAME_CHARACTER.test(char)) {
+            result += char;
+            continue;
+        }
+        for (const byte of Buffer.from(char, 'utf8')) {
+            result += `%${byte.toString(16).toUpperCase().padStart(2, '0')}`;
+        }
+    }
+    return result;
 }
 
 // The root project (empty or ".") gets no slug.

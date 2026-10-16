@@ -17,6 +17,9 @@ interface WorkspaceSpec {
     exclude: readonly string[];
 }
 
+// Workspace specs by project key, filled by discoverProjects and reused by the membership check.
+export type WorkspaceSpecs = Map<string, WorkspaceSpec | undefined>;
+
 const LOCK_ECOSYSTEMS: ReadonlyMap<string, Ecosystem> = new Map([
     ['package-lock.json', 'js'],
     ['npm-shrinkwrap.json', 'js'],
@@ -230,9 +233,20 @@ function uvWorkspace(dir: string): WorkspaceSpec | undefined {
     return include.length > 0 ? { include, exclude: arrays.get('exclude') ?? [] } : undefined;
 }
 
-function workspaceOf(worktree: string, project: Project): WorkspaceSpec | undefined {
+function specKey(project: Project): string {
+    return `${project.ecosystem}\0${project.dir}`;
+}
+
+// The manifests of a project are read once per specs map.
+function workspaceOf(worktree: string, project: Project, specs: WorkspaceSpecs): WorkspaceSpec | undefined {
+    const key = specKey(project);
+    if (specs.has(key)) {
+        return specs.get(key);
+    }
     const dir = path.join(worktree, project.dir);
-    return project.ecosystem === 'js' ? jsWorkspace(dir) : uvWorkspace(dir);
+    const spec = project.ecosystem === 'js' ? jsWorkspace(dir) : uvWorkspace(dir);
+    specs.set(key, spec);
+    return spec;
 }
 
 function relativeBelow(ancestor: string, dir: string): string | undefined {
@@ -277,14 +291,18 @@ function compareProjects(a: Project, b: Project): number {
 }
 
 // Projects are folders with tracked lock files; members of a workspace rooted in an ancestor folder are dropped.
-export async function discoverProjects(deps: Deps, worktree: string): Promise<Project[] | undefined> {
+export async function discoverProjects(
+    deps: Deps,
+    worktree: string,
+    specs: WorkspaceSpecs = new Map()
+): Promise<Project[] | undefined> {
     const result = await deps.runner.run({ file: 'git', args: ['-C', worktree, 'ls-files', '-z'] });
     if (result.code !== 0) {
         return undefined;
     }
     const projects = groupLocks(result.stdout.split('\0').filter((file) => file.length > 0));
     const roots = projects
-        .map((project) => ({ project, spec: workspaceOf(worktree, project) }))
+        .map((project) => ({ project, spec: workspaceOf(worktree, project, specs) }))
         .filter((root): root is { project: Project; spec: WorkspaceSpec } => root.spec !== undefined);
     const kept = projects.filter(
         (project) =>
@@ -299,9 +317,15 @@ export async function discoverProjects(deps: Deps, worktree: string): Promise<Pr
     return kept.toSorted(compareProjects);
 }
 
-// Whether FOLDER, relative to the worktree, is a member of the workspace rooted at PROJECT; files are read each call.
-export function isWorkspaceMember(worktree: string, project: Project, folder: string): boolean {
-    const spec = workspaceOf(worktree, project);
+// Whether FOLDER, relative to the worktree, is a member of the workspace rooted at PROJECT; pass the specs map given
+// to discoverProjects so its manifests are not read again.
+export function isWorkspaceMember(
+    worktree: string,
+    project: Project,
+    folder: string,
+    specs: WorkspaceSpecs = new Map()
+): boolean {
+    const spec = workspaceOf(worktree, project, specs);
     const rel = relativeBelow(project.dir, folder);
     return spec !== undefined && rel !== undefined && isMember(spec, rel);
 }

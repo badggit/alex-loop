@@ -67,6 +67,12 @@ await test('removeSafely removes a real folder and treats a missing path as remo
     assert.deepEqual(removeSafely(fixture.worktree, 'missing'), { ok: true });
 });
 
+await test('removeSafely treats a path whose parent folder is missing as removed', (t) => {
+    const fixture = makeFixture(t);
+    assert.deepEqual(removeSafely(fixture.worktree, 'apps/web/node_modules'), { ok: true });
+    assert.equal(lstatOrUndefined(path.join(fixture.worktree, 'apps')), undefined);
+});
+
 await test('removeSafely refuses empty, absolute and ".." paths', (t) => {
     const fixture = makeFixture(t);
     const outside = path.join(fixture.root, 'outside.txt');

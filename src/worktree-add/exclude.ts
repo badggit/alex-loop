@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { errorCode } from './paths.ts';
 import { showText } from './text.ts';
 import type { Deps } from './types.ts';
 
@@ -17,13 +18,6 @@ type ReadResult = { ok: true; text: string } | { ok: false };
 export function anchoredPattern(rel: string): string {
     const escaped = rel.replaceAll(GLOB_CHARACTERS, String.raw`\$&`);
     return `/${escaped.endsWith(' ') ? `${escaped.slice(0, -1)}${String.raw`\ `}` : escaped}`;
-}
-
-function errorCode(error: unknown): string | undefined {
-    if (error instanceof Error && 'code' in error && typeof error.code === 'string') {
-        return error.code;
-    }
-    return;
 }
 
 // A missing file reads as empty; any other read failure means the file cannot be updated safely.

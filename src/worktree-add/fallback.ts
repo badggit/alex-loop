@@ -1,11 +1,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { errorCode, isOwnLink, JS_DEPS, lstatOrUndefined, parentInside } from './paths.ts';
+import { errorCode, isOwnLink, JS_DEPS, lstatOrUndefined, parentExists, parentInside } from './paths.ts';
 import { showText } from './text.ts';
 import type { Deps, EntryTransfer } from './types.ts';
 
-export type FallbackKind = 'cloned' | 'linked' | 'present' | 'failed';
+// no-parent: the folder that would hold the entry does not exist in the worktree (another branch layout).
+export type FallbackKind = 'cloned' | 'linked' | 'present' | 'no-parent' | 'failed';
+
+export type LinkResult = 'created' | 'exists' | 'failed';
 
 export interface FallbackResult {
     rel: string;
@@ -19,23 +22,33 @@ interface FallbackRun {
     transfer: EntryTransfer;
 }
 
-// An own link already standing counts as linked; a foreign entry that appears before the link is made is present.
-function ensureLink(run: FallbackRun, rel: string): FallbackKind {
+// Links REL of the worktree to the same path in the main clone; any entry standing there (also one that appears
+// before the link is made) is left alone and reported as exists. Other failures are warned about here.
+export function makeLink(run: { deps: Deps; main: string; worktree: string }, rel: string): LinkResult {
     const dest = path.join(run.worktree, rel);
     if (lstatOrUndefined(dest) !== undefined) {
-        return isOwnLink(run, rel) ? 'linked' : 'present';
+        return 'exists';
     }
     try {
         fs.symlinkSync(path.join(run.main, rel), dest);
-        return 'linked';
+        return 'created';
     } catch (error) {
         const code = errorCode(error);
         if (code === 'EEXIST') {
-            return isOwnLink(run, rel) ? 'linked' : 'present';
+            return 'exists';
         }
         run.deps.log.warn(`cannot link ${showText(rel)} into the worktree: ${showText(code)}`);
         return 'failed';
     }
+}
+
+// An own link already standing counts as linked; a foreign entry that appears before the link is made is present.
+function ensureLink(run: FallbackRun, rel: string): FallbackKind {
+    const result = makeLink(run, rel);
+    if (result === 'exists') {
+        return isOwnLink(run, rel) ? 'linked' : 'present';
+    }
+    return result === 'created' ? 'linked' : 'failed';
 }
 
 // The transfer replaces an own link standing at the destination with the clone and restores it when that fails.
@@ -58,6 +71,9 @@ function destinationOpen(run: FallbackRun, rel: string): boolean {
 
 // Only node_modules is cloned: other dependency folders (a venv) keep the main clone's absolute paths when copied.
 async function fallbackFor(run: FallbackRun, rel: string): Promise<FallbackKind> {
+    if (!parentExists(run.worktree, rel)) {
+        return 'no-parent';
+    }
     if (!parentInside(run.worktree, rel) || !destinationOpen(run, rel)) {
         return 'present';
     }

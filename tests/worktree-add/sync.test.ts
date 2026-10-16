@@ -38,6 +38,7 @@ const IGNORED_FILES = [
     'docs.local/a.md',
     '.claude/settings.json',
     '.venv/bin/python',
+    '.venv/pyvenv.cfg',
     'config/.env',
     'dist/out.js',
     'x.tsbuildinfo',
@@ -144,9 +145,9 @@ await test('classify follows the class table by the last path component', () => 
         ['tsconfig.tsbuildinfo', 'skip'],
         ['docs.local', 'link'],
         ['.claude', 'link'],
-        ['.venv', 'dep'],
-        ['venv', 'dep'],
-        ['services/api/.venv', 'dep'],
+        ['.venv', 'link'],
+        ['venv', 'link'],
+        ['services/api/.venv', 'link'],
         ['AGENTS.local.md', 'link'],
         ['config', 'link'],
         ['.envrc', 'link'],
@@ -190,6 +191,22 @@ await test('an ignored folder of any name holding pyvenv.cfg is returned as a de
     const lines = excludeLines(fixture);
     assert.equal(lines.includes('/tools-env'), false);
     assert.equal(lines.includes('/plain-tools'), true);
+});
+
+await test('a venv or .venv without pyvenv.cfg is an ordinary ignored entry and is linked', async (t) => {
+    const fixture = makeFixture(t);
+    const { env, main, worktree, deps } = fixture;
+    commitFile(env, main, '.gitignore', `${IGNORE_RULES}venv/\napps/web/.venv\n`);
+    writeFile(path.join(main, 'venv', 'settings.ini'), 'plain\n');
+    writeFile(path.join(main, 'apps', 'web', '.venv'), 'PYTHON=3.12\n');
+    const depRels = await syncIgnored(deps, main, worktree, fakeTransfer());
+    assert.ok(depRels, 'the ignored files of the main clone could not be listed');
+    assert.deepEqual(depRels.toSorted(), DEP_RELS);
+    assert.equal(linkText(path.join(worktree, 'venv')), path.join(main, 'venv'));
+    assert.equal(linkText(path.join(worktree, 'apps', 'web', '.venv')), path.join(main, 'apps', 'web', '.venv'));
+    const lines = excludeLines(fixture);
+    assert.equal(lines.includes('/venv'), true);
+    assert.equal(lines.includes('/apps/web/.venv'), true);
 });
 
 await test('dependency folders get no pattern from the sync and a second run changes nothing', async (t) => {

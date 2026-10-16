@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { errorCode, JS_DEPS, lstatOrUndefined, parentInside, UV_VENV } from './paths.ts';
+import { errorCode, JS_DEPS, lstatOrUndefined, parentExists, parentInside, realOrUndefined, UV_VENV } from './paths.ts';
 import { failureLine, showText } from './text.ts';
 import type { Deps } from './types.ts';
 
@@ -57,11 +57,15 @@ function refusal(rel: string): string | undefined {
 }
 
 // Never follows a link: a link is unlinked, and a parent reached through a link (into the main clone) is refused.
+// A path whose parent folder is missing holds nothing, so it counts as removed.
 export function removeSafely(root: string, rel: string): RemoveResult {
     const clean = withoutTrailingSeparators(rel);
     const refused = refusal(clean);
     if (refused !== undefined) {
         return { ok: false, reason: refused };
+    }
+    if (realOrUndefined(root) !== undefined && !parentExists(root, clean)) {
+        return { ok: true };
     }
     if (!parentInside(root, clean)) {
         return { ok: false, reason: `refused a path whose parent is not inside ${showText(root)}: ${showText(clean)}` };

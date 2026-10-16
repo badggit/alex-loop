@@ -3,7 +3,8 @@ import { JS_DEPS, UV_VENV } from './paths.ts';
 
 export interface AssignedProject extends Project {
     depRels: readonly string[];
-    reportOnly: readonly string[];
+    // Python environments inside the uv project other than its root .venv: never installed, linked like an orphan.
+    linkOnly: readonly string[];
     auto: boolean;
 }
 
@@ -17,7 +18,7 @@ function splitRel(rel: string): { parent: string; name: string } {
     return slash === -1 ? { parent: '', name: rel } : { parent: rel.slice(0, slash), name: rel.slice(slash + 1) };
 }
 
-function isAtOrAbove(dir: string, folder: string): boolean {
+export function isAtOrAbove(dir: string, folder: string): boolean {
     return dir === '' || folder === dir || folder.startsWith(`${dir}/`);
 }
 
@@ -48,7 +49,7 @@ export function assignDependencies(
     isMember: WorkspaceCheck
 ): Assignment {
     const installs: string[][] = projects.map(() => []);
-    const reports: string[][] = projects.map(() => []);
+    const links: string[][] = projects.map(() => []);
     const orphans: string[] = [];
     for (const rel of depRels) {
         const { parent, name } = splitRel(rel);
@@ -64,16 +65,16 @@ export function assignDependencies(
             continue;
         }
         const installed = ecosystem === 'js' || (name === UV_VENV && parent === project.dir);
-        (installed ? installs : reports)[owner]?.push(rel);
+        (installed ? installs : links)[owner]?.push(rel);
     }
     const assigned = projects.map((project, index): AssignedProject => {
         const ownDeps = installs[index] ?? [];
-        const ownReports = reports[index] ?? [];
+        const ownLinks = links[index] ?? [];
         return {
             ...project,
             depRels: ownDeps,
-            reportOnly: ownReports,
-            auto: project.dir === '' || ownDeps.length > 0 || ownReports.length > 0,
+            linkOnly: ownLinks,
+            auto: project.dir === '' || ownDeps.length > 0 || ownLinks.length > 0,
         };
     });
     return { projects: assigned, orphans };
