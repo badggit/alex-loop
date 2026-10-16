@@ -11,7 +11,7 @@ import { checkBranchName, locateRepository } from './repo.ts';
 import { logExistingBranch, logSameTicket, startPoint } from './start.ts';
 import { syncIgnored } from './sync.ts';
 import { deriveTarget } from './target.ts';
-import { showText } from './text.ts';
+import { messageOf, showText } from './text.ts';
 import { createTransfer } from './transfer.ts';
 import type {
     ApplyStep,
@@ -81,34 +81,22 @@ async function stepFor(deps: Deps, repo: RepoLayout, target: WorktreeTarget, dec
     }
 }
 
-// Never throws: a thrown value whose conversion to text throws is shown as an unknown error.
-function messageOf(error: unknown): string {
-    try {
-        return showText(error instanceof Error ? error.message : String(error));
-    } catch {
-        return 'unknown error';
-    }
-}
-
-type SyncResult = { ok: true; depRels: string[] } | { ok: false; reason: string };
-
-// The worktree already exists here, so a sync that throws is only a warning; a failed result carries why the
-// dependency folders of the main clone are unknown.
+// The worktree already exists here, so a sync that throws is only a warning. Undefined means the dependency
+// folders of the main clone are unknown; exactly one warning says so, the listing one coming from syncIgnored.
 async function syncQuietly(
     deps: Deps,
     repo: RepoLayout,
     target: WorktreeTarget,
     transfer: EntryTransfer
-): Promise<SyncResult> {
+): Promise<string[] | undefined> {
     try {
-        const depRels = await syncIgnored(deps, repo.main, target.path, transfer);
-        return depRels === undefined
-            ? { ok: false, reason: 'the ignored files of the main clone could not be listed' }
-            : { ok: true, depRels };
+        return await syncIgnored(deps, repo.main, target.path, transfer);
     } catch (error) {
-        const message = messageOf(error);
-        deps.log.warn(`cannot sync ignored paths into the worktree: ${message}`);
-        return { ok: false, reason: message };
+        deps.log.warn(
+            `cannot sync ignored paths into the worktree: ${messageOf(error)}; ` +
+                'the dependency fallback from the main clone is skipped'
+        );
+        return undefined;
     }
 }
 
@@ -141,17 +129,18 @@ async function syncAndInstall(
         worktree: target.path,
         gate: io.gate ?? createCloneGate(),
     });
-    const synced = await syncQuietly(deps, repo, target, transfer);
-    if (!synced.ok) {
-        deps.log.warn(`cannot install dependencies: ${synced.reason}`);
+    const depRels = await syncQuietly(deps, repo, target, transfer);
+    // With --no-install the stage only clones or links the main clone's folders, which are unknown here.
+    if (depRels === undefined && context.noInstall) {
         return;
     }
+    // Unknown folders install from the worktree's own lock files with no fallback for orphans.
     await installQuietly({
         deps,
         env: io.env,
         main: repo.main,
         worktree: target.path,
-        depRels: synced.depRels,
+        depRels: depRels ?? [],
         noInstall: context.noInstall,
         transfer,
         startedMs: context.startedMs,

@@ -70,6 +70,20 @@ function showText(value) {
   }
   return shown;
 }
+function failureLine(result) {
+  if (result.spawnError !== void 0) {
+    return result.spawnError;
+  }
+  const [first = ""] = result.stderr.trim().split("\n", 1);
+  return first.length > 0 ? first : `git exited with code ${String(result.code)}`;
+}
+function messageOf(error) {
+  try {
+    return showText(error instanceof Error ? error.message : String(error));
+  } catch {
+    return "unknown error";
+  }
+}
 var FIRST_PRINTABLE, DELETE;
 var init_text = __esm({
   "src/worktree-add/text.ts"() {
@@ -319,9 +333,12 @@ function parentInside(root, rel) {
   const parent = realOrUndefined(path.dirname(path.join(root, rel)));
   return realRoot !== void 0 && parent === path.join(realRoot, path.dirname(rel));
 }
+var JS_DEPS, UV_VENV;
 var init_paths = __esm({
   "src/worktree-add/paths.ts"() {
     "use strict";
+    JS_DEPS = "node_modules";
+    UV_VENV = ".venv";
   }
 });
 
@@ -1047,7 +1064,7 @@ function git2(deps, dir, args) {
 function succeeded2(result) {
   return result.code === 0 && result.spawnError === void 0;
 }
-function failureLine(result) {
+function failureLine2(result) {
   if (result.spawnError !== void 0) {
     return result.spawnError;
   }
@@ -1090,7 +1107,7 @@ async function checkRef(deps, dir, ref, kind) {
   if (result.spawnError === void 0 && (result.code === 0 || result.code === REF_ABSENT_CODE)) {
     return { ok: true, exists: result.code === 0 };
   }
-  return { ok: false, reason: `cannot check ${kind} ${showText(ref)}: ${showText(failureLine(result))}` };
+  return { ok: false, reason: `cannot check ${kind} ${showText(ref)}: ${showText(failureLine2(result))}` };
 }
 async function remoteMatchesOf(deps, dir, branch) {
   const listed = await git2(deps, dir, ["remote"]);
@@ -1180,7 +1197,7 @@ function nearestOwner(projects, ecosystem, folder) {
   }
   return best;
 }
-function assignDependencies(projects, depRels) {
+function assignDependencies(projects, depRels, isMember2) {
   const installs = projects.map(() => []);
   const reports = projects.map(() => []);
   const orphans = [];
@@ -1188,12 +1205,12 @@ function assignDependencies(projects, depRels) {
     const { parent, name } = splitRel(rel);
     const ecosystem = name === JS_DEPS ? "js" : "uv";
     const owner = nearestOwner(projects, ecosystem, parent);
-    if (owner === void 0) {
+    const project = owner === void 0 ? void 0 : projects[owner];
+    if (owner === void 0 || project === void 0 || ecosystem === "js" && parent !== project.dir && !isMember2(project, parent)) {
       orphans.push(rel);
       continue;
     }
-    const ownerDir = projects[owner]?.dir;
-    const installed = ecosystem === "js" || name === UV_VENV && parent === ownerDir;
+    const installed = ecosystem === "js" || name === UV_VENV && parent === project.dir;
     (installed ? installs : reports)[owner]?.push(rel);
   }
   const assigned = projects.map((project, index) => {
@@ -1208,12 +1225,10 @@ function assignDependencies(projects, depRels) {
   });
   return { projects: assigned, orphans };
 }
-var JS_DEPS, UV_VENV;
 var init_assign = __esm({
   "src/worktree-add/assign.ts"() {
     "use strict";
-    JS_DEPS = "node_modules";
-    UV_VENV = ".venv";
+    init_paths();
   }
 });
 
@@ -1233,17 +1248,11 @@ function installCommand(manager) {
 function combined(result) {
   return result.stdout + result.stderr;
 }
-function errorText(error) {
-  return error instanceof Error ? error.message : String(error);
-}
-function isMissingFile(error) {
-  return error instanceof Error && "code" in error && error.code === "ENOENT";
-}
 function readLock(file) {
   try {
     return { kind: "bytes", bytes: fs8.readFileSync(file) };
   } catch (error) {
-    return isMissingFile(error) ? { kind: "absent" } : { kind: "unreadable", reason: errorText(error) };
+    return errorCode(error) === "ENOENT" ? { kind: "absent" } : { kind: "unreadable", reason: messageOf(error) };
   }
 }
 function readLocks(files) {
@@ -1274,14 +1283,18 @@ function restoreLocks(snapshot) {
         fs8.writeFileSync(file, before.bytes);
       }
     } catch (error) {
-      problems.push(`${file}: ${errorText(error)}`);
+      problems.push(`${file}: ${messageOf(error)}`);
     }
   }
   return problems.length === 0 ? { changed } : { changed, problem: problems.join("; ") };
 }
 function attemptsOf(commands, networkTimeoutMs) {
-  const online = { args: commands.online(networkTimeoutMs), env: commands.onlineEnv(networkTimeoutMs) };
-  return commands.offline === void 0 ? { online } : { offline: { args: commands.offline, env: {} }, online };
+  const online = {
+    args: commands.online(networkTimeoutMs),
+    env: { ...commands.env, ...commands.onlineEnv(networkTimeoutMs) }
+  };
+  const offline = commands.offline === void 0 ? void 0 : { args: commands.offline, env: commands.env };
+  return offline === void 0 ? { online } : { offline, online };
 }
 function showsOfflineMiss(commands, result) {
   const text = combined(result);
@@ -1351,10 +1364,12 @@ async function runInstall(deps, request) {
     lastOutput: last === void 0 ? "" : combined(last)
   };
 }
-var NPM_STYLE_FETCH_LIMITS, NO_ENV, COMMANDS;
+var NPM_STYLE_FETCH_LIMITS, NO_ENV, UV_OWN_ENV, COMMANDS;
 var init_attempt = __esm({
   "src/worktree-add/attempt.ts"() {
     "use strict";
+    init_paths();
+    init_text();
     NPM_STYLE_FETCH_LIMITS = (timeoutMs) => [
       `--fetch-timeout=${timeoutMs}`,
       "--fetch-retries=1",
@@ -1362,6 +1377,7 @@ var init_attempt = __esm({
       "--fetch-retry-maxtimeout=10000"
     ];
     NO_ENV = () => ({});
+    UV_OWN_ENV = { UV_PROJECT_ENVIRONMENT: void 0, VIRTUAL_ENV: void 0 };
     COMMANDS = {
       npm: {
         file: "npm",
@@ -1369,6 +1385,7 @@ var init_attempt = __esm({
         offline: ["ci", "--offline"],
         offlineMissSignals: ["ENOTCACHED"],
         online: (timeoutMs) => ["ci", ...NPM_STYLE_FETCH_LIMITS(timeoutMs)],
+        env: {},
         onlineEnv: NO_ENV
       },
       pnpm: {
@@ -1377,6 +1394,7 @@ var init_attempt = __esm({
         offline: ["install", "--frozen-lockfile", "--offline"],
         offlineMissSignals: ["ERR_PNPM_NO_OFFLINE_TARBALL", "ERR_PNPM_NO_OFFLINE_META"],
         online: (timeoutMs) => ["install", "--frozen-lockfile", ...NPM_STYLE_FETCH_LIMITS(timeoutMs)],
+        env: {},
         onlineEnv: NO_ENV
       },
       "yarn-classic": {
@@ -1385,6 +1403,7 @@ var init_attempt = __esm({
         offline: ["install", "--frozen-lockfile", "--offline"],
         offlineMissSignals: ["Couldn't find any versions", "Can't make a request in offline mode"],
         online: (timeoutMs) => ["install", "--frozen-lockfile", "--network-timeout", String(timeoutMs)],
+        env: {},
         onlineEnv: NO_ENV
       },
       "yarn-berry": {
@@ -1393,6 +1412,7 @@ var init_attempt = __esm({
         offline: void 0,
         offlineMissSignals: [],
         online: () => ["install", "--immutable"],
+        env: {},
         onlineEnv: (timeoutMs) => ({ YARN_HTTP_TIMEOUT: String(timeoutMs), YARN_HTTP_RETRY: "1" })
       },
       bun: {
@@ -1401,6 +1421,7 @@ var init_attempt = __esm({
         offline: void 0,
         offlineMissSignals: [],
         online: () => ["install", "--frozen-lockfile"],
+        env: {},
         onlineEnv: NO_ENV
       },
       uv: {
@@ -1409,6 +1430,7 @@ var init_attempt = __esm({
         offline: ["sync", "--frozen", "--offline"],
         offlineMissSignals: ["not found in the cache", "Network connectivity is disabled"],
         online: () => ["sync", "--frozen"],
+        env: UV_OWN_ENV,
         onlineEnv: uvEnv
       }
     };
@@ -1449,13 +1471,6 @@ var init_mask = __esm({
 
 // src/worktree-add/configGuard.ts
 import path7 from "node:path";
-function failureLine2(result) {
-  if (result.spawnError !== void 0) {
-    return result.spawnError;
-  }
-  const [first = ""] = result.stderr.trim().split("\n", 1);
-  return first.length > 0 ? first : `git exited with code ${String(result.code)}`;
-}
 function configGit(deps, file, args) {
   return deps.runner.run({ file: "git", args: ["config", "--file", file, ...args] });
 }
@@ -1480,7 +1495,7 @@ function parseList(stdout) {
 async function readConfig(deps, file) {
   const result = await configGit(deps, file, ["--list", "-z"]);
   if (result.code !== 0) {
-    return { ok: false, reason: failureLine2(result) };
+    return { ok: false, reason: failureLine(result) };
   }
   return { ok: true, entries: parseList(result.stdout) };
 }
@@ -1500,6 +1515,10 @@ async function currentValues(deps, env, file, key) {
   const read = await readConfig(deps, file);
   return read.ok ? shownValues(key, read.entries.get(key) ?? [], env) : UNKNOWN;
 }
+function isConcurrentKey(key) {
+  const [section = ""] = key.split(".", 1);
+  return CONCURRENT_SECTIONS.has(section.toLowerCase());
+}
 async function snapshotSharedConfig(deps, worktree) {
   const result = await deps.runner.run({ file: "git", args: ["-C", worktree, "rev-parse", "--git-common-dir"] });
   const printed2 = result.stdout.trim();
@@ -1513,12 +1532,12 @@ async function snapshotSharedConfig(deps, worktree) {
 async function restoreKey(deps, file, key, values) {
   const unset = await configGit(deps, file, ["--unset-all", key]);
   if (unset.code !== 0 && unset.code !== KEY_ABSENT_CODE) {
-    return failureLine2(unset);
+    return failureLine(unset);
   }
   for (const value of values) {
     const added = await configGit(deps, file, ["--add", key, value]);
     if (added.code !== 0) {
-      return failureLine2(added);
+      return failureLine(added);
     }
   }
   return;
@@ -1536,7 +1555,7 @@ async function revertConfigChanges(deps, env, snapshot) {
   for (const key of keys) {
     const before = snapshot.entries.get(key) ?? [];
     const after = read.entries.get(key) ?? [];
-    if (sameValues(before, after)) {
+    if (isConcurrentKey(key) || sameValues(before, after)) {
       continue;
     }
     const shownKey = showText(maskSecrets(key, env));
@@ -1554,7 +1573,7 @@ async function revertConfigChanges(deps, env, snapshot) {
   }
   return reverted;
 }
-var KEY_ABSENT_CODE, UNSET, UNKNOWN, HIDDEN, SENSITIVE_KEY;
+var KEY_ABSENT_CODE, UNSET, UNKNOWN, HIDDEN, SENSITIVE_KEY, CONCURRENT_SECTIONS;
 var init_configGuard = __esm({
   "src/worktree-add/configGuard.ts"() {
     "use strict";
@@ -1565,6 +1584,7 @@ var init_configGuard = __esm({
     UNKNOWN = "(unknown)";
     HIDDEN = "***";
     SENSITIVE_KEY = /extraheader|password|passwd|token|secret|cookie|credential|auth/iu;
+    CONCURRENT_SECTIONS = /* @__PURE__ */ new Set(["branch", "remote"]);
   }
 });
 
@@ -1821,6 +1841,11 @@ async function discoverProjects(deps, worktree) {
   );
   return kept.toSorted(compareProjects);
 }
+function isWorkspaceMember(worktree, project, folder) {
+  const spec = workspaceOf(worktree, project);
+  const rel = relativeBelow(project.dir, folder);
+  return spec !== void 0 && rel !== void 0 && isMember(spec, rel);
+}
 var LOCK_ECOSYSTEMS, UV_WORKSPACE_TABLE;
 var init_discover = __esm({
   "src/worktree-add/discover.ts"() {
@@ -1940,9 +1965,6 @@ function classifyFailure(input) {
   if (matchesAny(output, SANDBOX_PATTERNS)) {
     return "sandbox";
   }
-  if (matchesAny(output, VERSION_MENTION_PATTERNS)) {
-    return "wrong-version";
-  }
   if (matchesAny(output, LOCK_OUT_OF_SYNC_PATTERNS)) {
     return "lock-out-of-sync";
   }
@@ -1951,6 +1973,9 @@ function classifyFailure(input) {
   }
   if (matchesAny(output, NETWORK_PATTERNS)) {
     return "network";
+  }
+  if (matchesAny(output, VERSION_MENTION_PATTERNS)) {
+    return "wrong-version";
   }
   return "other";
 }
@@ -2175,7 +2200,7 @@ async function fallbackFor(run, rel) {
   if (!parentInside(run.worktree, rel) || !destinationOpen(run, rel)) {
     return "present";
   }
-  if (path10.posix.basename(rel) === CLONED_NAME) {
+  if (path10.posix.basename(rel) === JS_DEPS) {
     return cloneOrLink(run, rel);
   }
   return ensureLink(run, rel);
@@ -2188,13 +2213,11 @@ async function applyFallback(deps, paths2, transfer, rels) {
   }
   return results;
 }
-var CLONED_NAME;
 var init_fallback = __esm({
   "src/worktree-add/fallback.ts"() {
     "use strict";
     init_paths();
     init_text();
-    CLONED_NAME = "node_modules";
   }
 });
 
@@ -2208,20 +2231,13 @@ function withoutTrailingSeparators(file) {
   }
   return result;
 }
-function failureLine3(result) {
-  if (result.spawnError !== void 0) {
-    return result.spawnError;
-  }
-  const [first = ""] = result.stderr.trim().split("\n", 1);
-  return first.length > 0 ? first : `git exited with code ${String(result.code)}`;
-}
 async function listUntracked(deps, dir) {
   const listed = await deps.runner.run({
     file: "git",
     args: ["-C", dir, "ls-files", "-z", "--others", "--directory"]
   });
   if (listed.code !== 0) {
-    return { ok: false, reason: failureLine3(listed) };
+    return { ok: false, reason: failureLine(listed) };
   }
   const entries = listed.stdout.split("\0").map((entry) => withoutTrailingSeparators(entry)).filter((entry) => entry.length > 0);
   return { ok: true, entries: new Set(entries) };
@@ -2267,6 +2283,36 @@ function removeSafely(root, rel) {
     return { ok: false, reason: `cannot remove ${showText(clean)}: ${showText(errorCode(error))}` };
   }
 }
+function isManagerArtifact(rel) {
+  const name = rel.split("/").at(-1) ?? "";
+  return TARGET_NAMES.has(name) || ROOT_ARTIFACTS.has(rel);
+}
+function removeNewYarnFolder(dir) {
+  const full = path11.join(dir, YARN_FOLDER);
+  if (lstatOrUndefined(full)?.isDirectory() !== true) {
+    return { ok: true };
+  }
+  for (const rel of YARN_ARTIFACTS) {
+    const removed = removeSafely(dir, rel);
+    if (!removed.ok) {
+      return removed;
+    }
+  }
+  try {
+    if (fs12.readdirSync(full).length === 0) {
+      fs12.rmdirSync(full);
+    }
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, reason: `cannot remove ${showText(YARN_FOLDER)}: ${showText(errorCode(error))}` };
+  }
+}
+function removeNewEntry(dir, rel) {
+  if (rel === YARN_FOLDER) {
+    return removeNewYarnFolder(dir);
+  }
+  return isManagerArtifact(rel) ? removeSafely(dir, rel) : { ok: true };
+}
 async function removeNewEntries(deps, dir, before) {
   const now = await listUntracked(deps, dir);
   if (!now.ok) {
@@ -2278,7 +2324,7 @@ async function removeNewEntries(deps, dir, before) {
     if (before.has(rel)) {
       continue;
     }
-    const removed = removeSafely(dir, rel);
+    const removed = removeNewEntry(dir, rel);
     if (!removed.ok) {
       leftovers.push(rel);
       firstReason ??= removed.reason;
@@ -2296,11 +2342,238 @@ function removalCommand(paths2) {
   const quoted = paths2.map((file) => shellQuote(withoutTrailingSeparators(file)));
   return ["rm", "-rf", "--", ...quoted].join(" ");
 }
+var TARGET_NAMES, YARN_FOLDER, YARN_ARTIFACTS, ROOT_ARTIFACTS;
 var init_cleanup = __esm({
   "src/worktree-add/cleanup.ts"() {
     "use strict";
     init_paths();
     init_text();
+    TARGET_NAMES = /* @__PURE__ */ new Set([JS_DEPS, UV_VENV]);
+    YARN_FOLDER = ".yarn";
+    YARN_ARTIFACTS = [".yarn/install-state.gz", ".yarn/unplugged", ".yarn/cache"];
+    ROOT_ARTIFACTS = /* @__PURE__ */ new Set([
+      ".pnp.cjs",
+      ".pnp.loader.mjs",
+      ".pnp.data.json",
+      ...YARN_ARTIFACTS
+    ]);
+  }
+});
+
+// src/worktree-add/proc.ts
+import { spawn } from "node:child_process";
+import { constants as osConstants } from "node:os";
+function errorCode6(error) {
+  if (error instanceof Error && "code" in error && typeof error.code === "string") {
+    return error.code;
+  }
+  return;
+}
+function childEnv(runnerEnv, requestEnv) {
+  const result = /* @__PURE__ */ new Map();
+  for (const [name, value] of Object.entries(runnerEnv)) {
+    if (value !== void 0) {
+      result.set(name, value);
+    }
+  }
+  for (const [name, value] of Object.entries(requestEnv ?? {})) {
+    if (value === void 0) {
+      result.delete(name);
+    } else {
+      result.set(name, value);
+    }
+  }
+  return Object.fromEntries(result);
+}
+function exitCodeOf(code, signal) {
+  if (code !== null) {
+    return code;
+  }
+  if (signal !== null) {
+    return 128 + osConstants.signals[signal];
+  }
+  return 1;
+}
+function signalGroup(pid, signal) {
+  if (pid === void 0) {
+    return;
+  }
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    return;
+  }
+}
+function groupHasMembers(pid) {
+  if (pid === void 0) {
+    return false;
+  }
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    return errorCode6(error) !== "ESRCH";
+  }
+}
+function trySpawn(request, env) {
+  try {
+    const child = spawn(request.file, [...request.args], {
+      cwd: request.cwd,
+      env: childEnv(env, request.env),
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true
+    });
+    return { child };
+  } catch (error) {
+    return { error: errorCode6(error) ?? (error instanceof Error ? error.message : "spawn failed") };
+  }
+}
+function ignoreResult() {
+  return;
+}
+function superviseChild(child, timeoutMs) {
+  let resolveResult = ignoreResult;
+  const result = new Promise((resolve) => {
+    resolveResult = resolve;
+  });
+  const pid = child.pid;
+  const output = { stdout: "", stderr: "" };
+  const timers = [];
+  let settled = false;
+  let cancelled = false;
+  let timedOut = false;
+  let killStepDone = false;
+  let exitCode;
+  let closeCode;
+  const finish = (value) => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    for (const timer of timers) {
+      clearTimeout(timer);
+    }
+    resolveResult(timedOut ? { ...value, timedOut: true } : value);
+  };
+  const finishWhenQuiet = () => {
+    if (closeCode !== void 0 && (killStepDone || !groupHasMembers(pid))) {
+      finish({ code: closeCode, ...output });
+    }
+  };
+  const poll = () => {
+    finishWhenQuiet();
+    if (!settled) {
+      timers.push(setTimeout(poll, GROUP_POLL_MS));
+    }
+  };
+  const cancel = () => {
+    if (cancelled || settled) {
+      return;
+    }
+    cancelled = true;
+    signalGroup(pid, "SIGTERM");
+    timers.push(
+      setTimeout(() => {
+        if (groupHasMembers(pid)) {
+          signalGroup(pid, "SIGKILL");
+        }
+        killStepDone = true;
+        finishWhenQuiet();
+      }, KILL_GRACE_MS),
+      setTimeout(() => {
+        child.stdout.destroy();
+        child.stderr.destroy();
+        finish({ code: closeCode ?? exitCode ?? KILLED_CODE, ...output });
+      }, GIVE_UP_MS)
+    );
+    poll();
+  };
+  if (timeoutMs !== void 0) {
+    timers.push(
+      setTimeout(
+        () => {
+          if (cancelled || settled) {
+            return;
+          }
+          if (exitCode === void 0) {
+            timedOut = true;
+          }
+          cancel();
+        },
+        Math.min(timeoutMs, MAX_TIMER_MS)
+      )
+    );
+  }
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    output.stdout += chunk;
+  });
+  child.stderr.on("data", (chunk) => {
+    output.stderr += chunk;
+  });
+  child.on("error", (error) => {
+    finish({ code: SPAWN_FAILED_CODE, ...output, spawnError: errorCode6(error) ?? error.message });
+  });
+  child.on("exit", (code, signal) => {
+    exitCode = exitCodeOf(code, signal);
+  });
+  child.on("close", (code, signal) => {
+    closeCode = exitCodeOf(code, signal);
+    if (cancelled) {
+      finishWhenQuiet();
+    } else {
+      finish({ code: closeCode, ...output });
+    }
+  });
+  return { cancel, result };
+}
+function runCommand(request, env, running) {
+  const attempt = trySpawn(request, env);
+  if ("error" in attempt) {
+    return Promise.resolve({ code: SPAWN_FAILED_CODE, stdout: "", stderr: "", spawnError: attempt.error });
+  }
+  const supervised = superviseChild(attempt.child, request.timeoutMs);
+  running.add(supervised);
+  return supervised.result.finally(() => {
+    running.delete(supervised);
+  });
+}
+async function terminateRunning(running) {
+  const pending = [...running];
+  for (const supervised of pending) {
+    supervised.cancel();
+  }
+  await Promise.all(pending.map((supervised) => supervised.result));
+}
+function createProcessRunner(env) {
+  const running = /* @__PURE__ */ new Set();
+  return {
+    run: (request) => runCommand(request, env, running),
+    terminateAll: () => terminateRunning(running)
+  };
+}
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 1) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return errorCode6(error) === "EPERM";
+  }
+}
+var SPAWN_FAILED_CODE, KILLED_CODE, KILL_GRACE_MS, GIVE_UP_MS, GROUP_POLL_MS, MAX_TIMER_MS;
+var init_proc = __esm({
+  "src/worktree-add/proc.ts"() {
+    "use strict";
+    SPAWN_FAILED_CODE = 127;
+    KILLED_CODE = 137;
+    KILL_GRACE_MS = 5e3;
+    GIVE_UP_MS = 1e4;
+    GROUP_POLL_MS = 50;
+    MAX_TIMER_MS = 2147483647;
   }
 });
 
@@ -2308,9 +2581,6 @@ var init_cleanup = __esm({
 import fs13 from "node:fs";
 import path12 from "node:path";
 function executableOf(manager) {
-  return EXECUTABLES[manager];
-}
-function displayName(manager) {
   return EXECUTABLES[manager];
 }
 function isJsFamily(name) {
@@ -2500,7 +2770,7 @@ async function checkManagerVersion(deps, manager, expected, projectDir, timeoutM
   if (result.code === SPAWN_FAILED_CODE && result.spawnError === "ENOENT") {
     return { kind: "missing" };
   }
-  const expectedText = expected?.text ?? `${displayName(manager)} (any version)`;
+  const expectedText = expected?.text ?? `${executableOf(manager)} (any version)`;
   if (result.code !== 0 || result.timedOut === true) {
     return { kind: "mismatch", expected: expectedText, found: `unknown (${failureReason(result, timeoutMs)})` };
   }
@@ -2515,13 +2785,13 @@ async function checkManagerVersion(deps, manager, expected, projectDir, timeoutM
   }
   return { kind: "ok", version };
 }
-var VERSION_TIMEOUT_MS, HEAD_BYTES, SPAWN_FAILED_CODE, LOCK_FAMILIES, FAMILY_LOCKS, EXECUTABLES, PNPM_LOCK_MAJORS;
+var VERSION_TIMEOUT_MS, HEAD_BYTES, LOCK_FAMILIES, FAMILY_LOCKS, EXECUTABLES, PNPM_LOCK_MAJORS;
 var init_managers = __esm({
   "src/worktree-add/managers.ts"() {
     "use strict";
+    init_proc();
     VERSION_TIMEOUT_MS = 2e4;
     HEAD_BYTES = 64 * 1024;
-    SPAWN_FAILED_CODE = 127;
     LOCK_FAMILIES = /* @__PURE__ */ new Map([
       ["package-lock.json", "npm"],
       ["npm-shrinkwrap.json", "npm"],
@@ -2650,14 +2920,14 @@ var init_privateArea = __esm({
 // src/worktree-add/installProject.ts
 import path14 from "node:path";
 function defaultFolder(project) {
-  const name = project.ecosystem === "js" ? "node_modules" : ".venv";
+  const name = project.ecosystem === "js" ? JS_DEPS : UV_VENV;
   return project.dir === "" ? name : `${project.dir}/${name}`;
 }
 function targetFolders(project) {
   return [.../* @__PURE__ */ new Set([...project.depRels, defaultFolder(project)])];
 }
 function shellWord(text) {
-  return SHELL_SAFE.test(text) ? text : `'${text.replaceAll("'", String.raw`'\''`)}'`;
+  return SHELL_SAFE.test(text) ? text : shellQuote(text);
 }
 function projectCommand(project, command) {
   return project.dir === "" ? command : `cd ${shellWord(project.dir)} && ${command}`;
@@ -2692,7 +2962,7 @@ function clearMarks(run, rels) {
 function logGroup(run, report2) {
   const lines = failureLines({
     ...report2,
-    manager: displayName(run.manager),
+    manager: executableOf(run.manager),
     where: run.project.dir,
     command: projectCommand(run.project, installCommand(run.manager)),
     missing: missingTargets(run)
@@ -2778,7 +3048,7 @@ function saveLog(run, output) {
   if (dir === void 0) {
     return { logPath: void 0, logProblem: NO_PRIVATE_DIR };
   }
-  const written = writeInstallLog(dir, logFileName(displayName(run.manager), run.project.dir), output);
+  const written = writeInstallLog(dir, logFileName(executableOf(run.manager), run.project.dir), output);
   return written.ok ? { logPath: written.path, logProblem: void 0 } : { logPath: void 0, logProblem: written.reason };
 }
 function warnUnlisted(run, reason) {
@@ -2883,16 +3153,16 @@ async function installChecked(run, deadlineMs) {
   await reportFailure(run, result, before);
   return { kind: "failed" };
 }
-async function installProject(ctx, project, deadlineMs) {
+async function installProject(ctx, project, deadlineMs, chosen) {
   const projectDir = path14.join(ctx.worktree, project.dir);
-  const choice = chooseManager(projectDir, project.ecosystem, project.lockNames);
+  const choice = chosen ?? chooseManager(projectDir, project.ecosystem, project.lockNames);
   if (choice.kind === "conflict") {
     const where = project.dir === "" ? "the worktree root" : showText(project.dir);
     ctx.deps.log.warn(`cannot install dependencies in ${where}: ${showText(choice.reason)}`);
     return { kind: "not-installed" };
   }
   const { manager } = choice;
-  const name = displayName(manager);
+  const name = executableOf(manager);
   const run = {
     ctx,
     project,
@@ -2943,37 +3213,40 @@ import path15 from "node:path";
 function shownList(rels) {
   return rels.map((rel) => showText(rel)).join(", ");
 }
-function relsOfKind(results, kind) {
-  return results.filter((result) => result.kind === kind).map((result) => result.rel);
+function groupTexts(results, groups) {
+  return groups.map(([kind, text]) => ({ text, rels: results.filter((result) => result.kind === kind) })).filter((group) => group.rels.length > 0).map((group) => group.text(shownList(group.rels.map((result) => result.rel))));
 }
 function paths(request) {
   return { main: request.main, worktree: request.worktree };
 }
-function commandOf(request, project) {
-  const choice = chooseManager(path15.join(request.worktree, project.dir), project.ecosystem, project.lockNames);
+function commandOf({ project, choice }) {
   if (choice.kind === "conflict") {
     return { manager: CONFLICT_MANAGER, command: CONFLICT_COMMAND };
   }
   return {
-    manager: displayName(choice.manager),
+    manager: executableOf(choice.manager),
     command: projectCommand(project, installCommand(choice.manager))
   };
 }
 async function skipAll(request) {
   const results = await applyFallback(request.deps, paths(request), request.transfer, request.depRels);
-  const groups = NO_INSTALL_GROUPS.map(([kind, text]) => ({ text, rels: relsOfKind(results, kind) })).filter((group) => group.rels.length > 0).map((group) => `${group.text} ${shownList(group.rels)}`);
+  const groups = groupTexts(results, NO_INSTALL_GROUPS);
   const summary = groups.length === 0 ? "no dependency folders in the main clone" : groups.join("; ");
   request.deps.log.info(`installs skipped (--no-install): ${summary}`);
 }
-function reportManual(request, projects) {
-  for (const project of projects) {
-    const { command } = commandOf(request, project);
+function projectPlace(project) {
+  return project.dir === "" ? "the worktree root" : showText(project.dir);
+}
+function reportManual(request, planned) {
+  for (const plan of planned) {
+    const { project } = plan;
+    const { command } = commandOf(plan);
     const run = `(run in the worktree: ${showText(command)})`;
     if (!project.auto) {
       request.deps.log.info(`not installed automatically: ${showText(project.dir)} ${run}`);
       continue;
     }
-    const where = project.dir === "" ? "the worktree root" : showText(project.dir);
+    const where = projectPlace(project);
     for (const folder of project.reportOnly) {
       request.deps.log.info(
         `not installed automatically: ${showText(folder)} belongs to the uv project in ${where} ${run}`
@@ -2981,15 +3254,15 @@ function reportManual(request, projects) {
     }
   }
 }
-function reportSandbox(request, projects) {
-  const commands = projects.map((project) => showText(commandOf(request, project).command));
+function reportSandbox(request, planned) {
+  const commands = planned.map((plan) => showText(commandOf(plan).command));
   const tail = commands.length === 0 ? "" : `; run later in the worktree: ${commands.join("; ")}`;
   request.deps.log.info(
     `installs skipped: the network is disabled in this sandbox; dependency folders stay missing${tail}`
   );
 }
 function orphanReason(rel) {
-  if (path15.posix.basename(rel) === JS_DEPS2) {
+  if (path15.posix.basename(rel) === JS_DEPS) {
     return `${showText(rel)} belongs to no project with a supported lock file`;
   }
   return `${showText(rel)} is a Python environment with no uv.lock next to it, and poetry, pip and pipenv are not installed automatically`;
@@ -3004,24 +3277,7 @@ function toolMissingTail(project, results) {
   if (results.length === 0) {
     return `nothing to link: ${shownList(targetFolders(project))} stays missing`;
   }
-  const parts = [];
-  const linked = relsOfKind(results, "linked");
-  const cloned = relsOfKind(results, "cloned");
-  const present = relsOfKind(results, "present");
-  const failed = relsOfKind(results, "failed");
-  if (linked.length > 0) {
-    parts.push(`linked ${shownList(linked)} meanwhile`);
-  }
-  if (cloned.length > 0) {
-    parts.push(`cloned ${shownList(cloned)} meanwhile`);
-  }
-  if (present.length > 0) {
-    parts.push(`${shownList(present)} already stand in the worktree and are left as they are`);
-  }
-  if (failed.length > 0) {
-    parts.push(`${shownList(failed)} stay missing`);
-  }
-  return parts.join("; ");
+  return groupTexts(results, TOOL_MISSING_GROUPS).join("; ");
 }
 async function handleToolMissing(request, project, manager) {
   const results = await applyFallback(request.deps, paths(request), request.transfer, project.depRels);
@@ -3032,8 +3288,9 @@ async function handleToolMissing(request, project, manager) {
     `to install: install ${shown} (or enable corepack), then rerun from the main clone; ` + toolMissingTail(project, results)
   );
 }
-function reportNotStarted(request, project) {
-  const { manager, command } = commandOf(request, project);
+function reportNotStarted(request, plan) {
+  const { project } = plan;
+  const { manager, command } = commandOf(plan);
   const missing = targetFolders(project).filter(
     (rel) => lstatOrUndefined(path15.join(request.worktree, rel)) === void 0
   );
@@ -3062,8 +3319,29 @@ async function takeSnapshot(request) {
   }
   return snapshot;
 }
-async function installAll(request, projects) {
-  if (projects.length === 0) {
+async function installOne(request, run, { project, choice }, untilMs) {
+  const { deps, env } = request;
+  let outcome;
+  try {
+    outcome = await installProject(run.ctx, project, untilMs, choice);
+  } catch (error) {
+    deps.log.warn(`cannot install dependencies in ${projectPlace(project)}: ${messageOf(error)}`);
+  }
+  if (run.snapshot !== void 0) {
+    try {
+      await revertConfigChanges(deps, env, run.snapshot);
+    } catch (error) {
+      deps.log.warn(
+        `cannot revert the shared repository config after installing in ${projectPlace(project)}: ` + messageOf(error)
+      );
+    }
+  }
+  if (outcome?.kind === "tool-missing") {
+    await handleToolMissing(request, project, outcome.manager);
+  }
+}
+async function installAll(request, planned) {
+  if (planned.length === 0) {
     return;
   }
   const { deps, env, timing, nowMs } = request;
@@ -3079,22 +3357,12 @@ async function installAll(request, projects) {
   };
   const snapshot = await takeSnapshot(request);
   const deadline = createDeadline(request.startedMs, timing.phaseMs, nowMs);
-  for (const [index, project] of projects.entries()) {
+  for (const [index, plan] of planned.entries()) {
     if (deadline.remainingMs() < MIN_START_MS) {
-      reportNotStarted(request, project);
+      reportNotStarted(request, plan);
       continue;
     }
-    let outcome;
-    try {
-      outcome = await installProject(ctx, project, nowMs() + deadline.shareMs(projects.length - index));
-    } finally {
-      if (snapshot !== void 0) {
-        await revertConfigChanges(deps, env, snapshot);
-      }
-    }
-    if (outcome.kind === "tool-missing") {
-      await handleToolMissing(request, project, outcome.manager);
-    }
+    await installOne(request, { ctx, snapshot }, plan, nowMs() + deadline.shareMs(planned.length - index));
   }
 }
 async function runInstallStage(request) {
@@ -3113,17 +3381,25 @@ async function runInstallStage(request) {
     deps.log.warn("cannot list the lock files of the worktree; no dependencies installed");
     return;
   }
-  const assignment = assignDependencies(found, depRels);
-  reportManual(request, assignment.projects);
-  const autoProjects = assignment.projects.filter((project) => project.auto);
+  const assignment = assignDependencies(
+    found,
+    depRels,
+    (project, folder) => isWorkspaceMember(worktree, project, folder)
+  );
+  const planned = assignment.projects.map((project) => ({
+    project,
+    choice: chooseManager(path15.join(worktree, project.dir), project.ecosystem, project.lockNames)
+  }));
+  reportManual(request, planned);
+  const autoProjects = planned.filter((plan) => plan.project.auto);
+  await handleOrphans(request, assignment.orphans);
   if (request.env[SANDBOX_NETWORK_VARIABLE] === "1") {
     reportSandbox(request, autoProjects);
     return;
   }
-  await handleOrphans(request, assignment.orphans);
   await installAll(request, autoProjects);
 }
-var DEFAULT_TIMING, SANDBOX_NETWORK_VARIABLE, CONFLICT_COMMAND, CONFLICT_MANAGER, NOT_STARTED, JS_DEPS2, NO_INSTALL_GROUPS, ORPHAN_KIND_TEXT;
+var DEFAULT_TIMING, SANDBOX_NETWORK_VARIABLE, CONFLICT_COMMAND, CONFLICT_MANAGER, NOT_STARTED, NO_INSTALL_GROUPS, TOOL_MISSING_GROUPS, ORPHAN_KIND_TEXT;
 var init_installStage = __esm({
   "src/worktree-add/installStage.ts"() {
     "use strict";
@@ -3149,12 +3425,17 @@ var init_installStage = __esm({
     CONFLICT_COMMAND = "install with the project's package manager";
     CONFLICT_MANAGER = "the package manager";
     NOT_STARTED = "the install phase ended before it started";
-    JS_DEPS2 = "node_modules";
     NO_INSTALL_GROUPS = [
-      ["cloned", "cloned"],
-      ["linked", "linked"],
-      ["present", "left as it is"],
-      ["failed", "failed"]
+      ["cloned", (shown) => `cloned ${shown}`],
+      ["linked", (shown) => `linked ${shown}`],
+      ["present", (shown) => `left as it is ${shown}`],
+      ["failed", (shown) => `failed ${shown}`]
+    ];
+    TOOL_MISSING_GROUPS = [
+      ["linked", (shown) => `linked ${shown} meanwhile`],
+      ["cloned", (shown) => `cloned ${shown} meanwhile`],
+      ["present", (shown) => `${shown} already stand in the worktree and are left as they are`],
+      ["failed", (shown) => `${shown} stay missing`]
     ];
     ORPHAN_KIND_TEXT = {
       cloned: "cloned it",
@@ -3173,7 +3454,7 @@ function gitIn(deps, dir, args) {
 function withoutFinalNewline(text) {
   return text.endsWith("\n") ? text.slice(0, -1) : text;
 }
-function failureLine4(result) {
+function failureLine3(result) {
   if (result.spawnError !== void 0) {
     return showText(result.spawnError);
   }
@@ -3207,7 +3488,7 @@ async function linkedLayout(deps, current, commonDir) {
 async function superprojectRefusal(deps, dir) {
   const result = await gitIn(deps, dir, ["rev-parse", "--show-superproject-working-tree"]);
   if (result.code !== 0) {
-    return `cannot check whether ${showText(dir)} is inside a superproject: ${failureLine4(result)}`;
+    return `cannot check whether ${showText(dir)} is inside a superproject: ${failureLine3(result)}`;
   }
   const superproject = withoutFinalNewline(result.stdout);
   if (superproject.length === 0) {
@@ -3250,7 +3531,7 @@ async function checkBranchName(deps, dir, branch) {
   if (result.spawnError === void 0 && result.code === BRANCH_REJECTED_CODE) {
     return "invalid";
   }
-  return { error: `cannot check the branch name ${showText(branch)}: ${failureLine4(result)}` };
+  return { error: `cannot check the branch name ${showText(branch)}: ${failureLine3(result)}` };
 }
 var BRANCH_REJECTED_CODE;
 var init_repo = __esm({
@@ -3504,7 +3785,9 @@ function excludedPatterns(run, entries) {
 async function syncIgnored(deps, main2, worktree, transfer) {
   const listed = await listIgnored(deps, main2);
   if (listed === void 0) {
-    deps.log.warn(`cannot list the ignored files of ${showText(main2)}; nothing synced into the worktree`);
+    deps.log.warn(
+      `cannot list the ignored files of ${showText(main2)}; nothing synced into the worktree and the dependency fallback is skipped`
+    );
     return void 0;
   }
   const entries = usableEntries(deps, listed).map((rel) => ({ rel, kind: entryClass(main2, rel) }));
@@ -3528,7 +3811,7 @@ var init_sync = __esm({
     init_text();
     COPY_NAMES = /* @__PURE__ */ new Set([".env", "CLAUDE.local.md", "temp.local"]);
     COPY_PREFIX = ".env.";
-    DEPENDENCY_NAMES = /* @__PURE__ */ new Set(["node_modules", ".venv", "venv"]);
+    DEPENDENCY_NAMES = /* @__PURE__ */ new Set([JS_DEPS, UV_VENV, "venv"]);
     VENV_MARKER = "pyvenv.cfg";
     SKIP_NAMES = /* @__PURE__ */ new Set([
       ".cache",
@@ -3586,215 +3869,6 @@ var init_target = __esm({
     "use strict";
     init_paths();
     init_text();
-  }
-});
-
-// src/worktree-add/proc.ts
-import { spawn } from "node:child_process";
-import { constants as osConstants } from "node:os";
-function errorCode6(error) {
-  if (error instanceof Error && "code" in error && typeof error.code === "string") {
-    return error.code;
-  }
-  return;
-}
-function childEnv(...layers) {
-  const result = {};
-  for (const layer of layers) {
-    for (const [name, value] of Object.entries(layer ?? {})) {
-      if (value !== void 0) {
-        result[name] = value;
-      }
-    }
-  }
-  return result;
-}
-function exitCodeOf(code, signal) {
-  if (code !== null) {
-    return code;
-  }
-  if (signal !== null) {
-    return 128 + osConstants.signals[signal];
-  }
-  return 1;
-}
-function signalGroup(pid, signal) {
-  if (pid === void 0) {
-    return;
-  }
-  try {
-    process.kill(-pid, signal);
-  } catch {
-    return;
-  }
-}
-function groupHasMembers(pid) {
-  if (pid === void 0) {
-    return false;
-  }
-  try {
-    process.kill(-pid, 0);
-    return true;
-  } catch (error) {
-    return errorCode6(error) !== "ESRCH";
-  }
-}
-function trySpawn(request, env) {
-  try {
-    const child = spawn(request.file, [...request.args], {
-      cwd: request.cwd,
-      env: childEnv(env, request.env),
-      stdio: ["ignore", "pipe", "pipe"],
-      detached: true
-    });
-    return { child };
-  } catch (error) {
-    return { error: errorCode6(error) ?? (error instanceof Error ? error.message : "spawn failed") };
-  }
-}
-function ignoreResult() {
-  return;
-}
-function superviseChild(child, timeoutMs) {
-  let resolveResult = ignoreResult;
-  const result = new Promise((resolve) => {
-    resolveResult = resolve;
-  });
-  const pid = child.pid;
-  const output = { stdout: "", stderr: "" };
-  const timers = [];
-  let settled = false;
-  let cancelled = false;
-  let timedOut = false;
-  let killStepDone = false;
-  let exitCode;
-  let closeCode;
-  const finish = (value) => {
-    if (settled) {
-      return;
-    }
-    settled = true;
-    for (const timer of timers) {
-      clearTimeout(timer);
-    }
-    resolveResult(timedOut ? { ...value, timedOut: true } : value);
-  };
-  const finishWhenQuiet = () => {
-    if (closeCode !== void 0 && (killStepDone || !groupHasMembers(pid))) {
-      finish({ code: closeCode, ...output });
-    }
-  };
-  const poll = () => {
-    finishWhenQuiet();
-    if (!settled) {
-      timers.push(setTimeout(poll, GROUP_POLL_MS));
-    }
-  };
-  const cancel = () => {
-    if (cancelled || settled) {
-      return;
-    }
-    cancelled = true;
-    signalGroup(pid, "SIGTERM");
-    timers.push(
-      setTimeout(() => {
-        if (groupHasMembers(pid)) {
-          signalGroup(pid, "SIGKILL");
-        }
-        killStepDone = true;
-        finishWhenQuiet();
-      }, KILL_GRACE_MS),
-      setTimeout(() => {
-        child.stdout.destroy();
-        child.stderr.destroy();
-        finish({ code: closeCode ?? exitCode ?? KILLED_CODE, ...output });
-      }, GIVE_UP_MS)
-    );
-    poll();
-  };
-  if (timeoutMs !== void 0) {
-    timers.push(
-      setTimeout(
-        () => {
-          if (!cancelled && !settled) {
-            timedOut = true;
-            cancel();
-          }
-        },
-        Math.min(timeoutMs, MAX_TIMER_MS)
-      )
-    );
-  }
-  child.stdout.setEncoding("utf8");
-  child.stderr.setEncoding("utf8");
-  child.stdout.on("data", (chunk) => {
-    output.stdout += chunk;
-  });
-  child.stderr.on("data", (chunk) => {
-    output.stderr += chunk;
-  });
-  child.on("error", (error) => {
-    finish({ code: SPAWN_FAILED_CODE2, ...output, spawnError: errorCode6(error) ?? error.message });
-  });
-  child.on("exit", (code, signal) => {
-    exitCode = exitCodeOf(code, signal);
-  });
-  child.on("close", (code, signal) => {
-    closeCode = exitCodeOf(code, signal);
-    if (cancelled) {
-      finishWhenQuiet();
-    } else {
-      finish({ code: closeCode, ...output });
-    }
-  });
-  return { cancel, result };
-}
-function runCommand(request, env, running) {
-  const attempt = trySpawn(request, env);
-  if ("error" in attempt) {
-    return Promise.resolve({ code: SPAWN_FAILED_CODE2, stdout: "", stderr: "", spawnError: attempt.error });
-  }
-  const supervised = superviseChild(attempt.child, request.timeoutMs);
-  running.add(supervised);
-  return supervised.result.finally(() => {
-    running.delete(supervised);
-  });
-}
-async function terminateRunning(running) {
-  const pending = [...running];
-  for (const supervised of pending) {
-    supervised.cancel();
-  }
-  await Promise.all(pending.map((supervised) => supervised.result));
-}
-function createProcessRunner(env) {
-  const running = /* @__PURE__ */ new Set();
-  return {
-    run: (request) => runCommand(request, env, running),
-    terminateAll: () => terminateRunning(running)
-  };
-}
-function pidAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 1) {
-    return false;
-  }
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return errorCode6(error) === "EPERM";
-  }
-}
-var SPAWN_FAILED_CODE2, KILLED_CODE, KILL_GRACE_MS, GIVE_UP_MS, GROUP_POLL_MS, MAX_TIMER_MS;
-var init_proc = __esm({
-  "src/worktree-add/proc.ts"() {
-    "use strict";
-    SPAWN_FAILED_CODE2 = 127;
-    KILLED_CODE = 137;
-    KILL_GRACE_MS = 5e3;
-    GIVE_UP_MS = 1e4;
-    GROUP_POLL_MS = 50;
-    MAX_TIMER_MS = 2147483647;
   }
 });
 
@@ -3917,21 +3991,14 @@ async function stepFor(deps, repo, target, decision) {
     }
   }
 }
-function messageOf(error) {
-  try {
-    return showText(error instanceof Error ? error.message : String(error));
-  } catch {
-    return "unknown error";
-  }
-}
 async function syncQuietly(deps, repo, target, transfer) {
   try {
-    const depRels = await syncIgnored(deps, repo.main, target.path, transfer);
-    return depRels === void 0 ? { ok: false, reason: "the ignored files of the main clone could not be listed" } : { ok: true, depRels };
+    return await syncIgnored(deps, repo.main, target.path, transfer);
   } catch (error) {
-    const message = messageOf(error);
-    deps.log.warn(`cannot sync ignored paths into the worktree: ${message}`);
-    return { ok: false, reason: message };
+    deps.log.warn(
+      `cannot sync ignored paths into the worktree: ${messageOf(error)}; the dependency fallback from the main clone is skipped`
+    );
+    return void 0;
   }
 }
 function mergedTiming(timing) {
@@ -3956,9 +4023,8 @@ async function syncAndInstall(io, context) {
     worktree: target.path,
     gate: io.gate ?? createCloneGate()
   });
-  const synced = await syncQuietly(deps, repo, target, transfer);
-  if (!synced.ok) {
-    deps.log.warn(`cannot install dependencies: ${synced.reason}`);
+  const depRels = await syncQuietly(deps, repo, target, transfer);
+  if (depRels === void 0 && context.noInstall) {
     return;
   }
   await installQuietly({
@@ -3966,7 +4032,7 @@ async function syncAndInstall(io, context) {
     env: io.env,
     main: repo.main,
     worktree: target.path,
-    depRels: synced.depRels,
+    depRels: depRels ?? [],
     noInstall: context.noInstall,
     transfer,
     startedMs: context.startedMs,

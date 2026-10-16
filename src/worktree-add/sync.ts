@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { addExcludePatterns, anchoredPattern, TEMP_PATTERN } from './exclude.ts';
-import { errorCode, isOwnLink, lstatOrUndefined, parentInside } from './paths.ts';
+import { errorCode, isOwnLink, JS_DEPS, lstatOrUndefined, parentInside, UV_VENV } from './paths.ts';
 import { hasControlCharacter, showText } from './text.ts';
 import type { Deps, EntryTransfer } from './types.ts';
 
@@ -23,7 +23,7 @@ interface SyncRun {
 
 const COPY_NAMES: ReadonlySet<string> = new Set(['.env', 'CLAUDE.local.md', 'temp.local']);
 const COPY_PREFIX = '.env.';
-const DEPENDENCY_NAMES: ReadonlySet<string> = new Set(['node_modules', '.venv', 'venv']);
+const DEPENDENCY_NAMES: ReadonlySet<string> = new Set([JS_DEPS, UV_VENV, 'venv']);
 const VENV_MARKER = 'pyvenv.cfg';
 // Build and cache outputs stay per worktree: a link would let one branch overwrite the outputs of another.
 const SKIP_NAMES: ReadonlySet<string> = new Set([
@@ -165,7 +165,9 @@ export async function syncIgnored(
 ): Promise<string[] | undefined> {
     const listed = await listIgnored(deps, main);
     if (listed === undefined) {
-        deps.log.warn(`cannot list the ignored files of ${showText(main)}; nothing synced into the worktree`);
+        deps.log.warn(
+            `cannot list the ignored files of ${showText(main)}; nothing synced into the worktree and the dependency fallback is skipped`
+        );
         return undefined;
     }
     const entries = usableEntries(deps, listed).map((rel) => ({ rel, kind: entryClass(main, rel) }));

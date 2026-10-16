@@ -22,6 +22,15 @@ await test('a request that finishes before its timeout is not marked timedOut', 
     assert.notEqual(result.timedOut, true);
 });
 
+await test('a timeout after the child exited stops what holds the pipes and keeps the exit code', async () => {
+    const runner = createProcessRunner(process.env);
+    const started = performance.now();
+    const result = await runner.run({ file: '/bin/sh', args: ['-c', 'sleep 30 & exit 3'], timeoutMs: 500 });
+    assert.ok(performance.now() - started < 7000);
+    assert.equal(result.code, 3);
+    assert.notEqual(result.timedOut, true);
+});
+
 await test('a timeout above the timer limit does not fire at once', async () => {
     const runner = createProcessRunner(process.env);
     const result = await runner.run({ file: '/bin/sh', args: ['-c', 'sleep 0.3; exit 0'], timeoutMs: 2 ** 31 });
@@ -46,10 +55,12 @@ await test('request env is absent from a following request when the runner lacks
     assert.equal(next.stdout, 'unset');
 });
 
-await test('an undefined request env value leaves the runner value in place', async () => {
+await test('an undefined request env value removes the runner value for that request only', async () => {
     const runner = createProcessRunner({ PATH: process.env.PATH, WTA_REQ: 'runner' });
     const result = await runner.run({ file: '/bin/sh', args: PRINT_REQ, env: { WTA_REQ: undefined } });
-    assert.equal(result.stdout, 'runner');
+    assert.equal(result.stdout, 'unset');
+    const next = await runner.run({ file: '/bin/sh', args: PRINT_REQ });
+    assert.equal(next.stdout, 'runner');
 });
 
 await test('a missing executable with a timeout resolves with 127 and ENOENT, not timedOut', async () => {

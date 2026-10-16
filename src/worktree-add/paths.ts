@@ -1,6 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+// Dependency folder names the managers install into: npm-family managers and uv.
+export const JS_DEPS = 'node_modules';
+export const UV_VENV = '.venv';
+
 // The real path, or the input unchanged when it cannot be resolved.
 export function canonical(file: string): string {
     try {

@@ -218,6 +218,26 @@ function throwAfterInstall(inner: CommandRunner): CommandRunner {
     };
 }
 
+// Like throwAfterInstall, and the config read that follows (the revert after the project) rejects too.
+function throwAndBreakRevert(inner: CommandRunner): CommandRunner {
+    const first = throwAfterInstall(inner);
+    let installed = false;
+    let broken = false;
+    return {
+        run: (request) => {
+            if (isInstall(request)) {
+                installed = true;
+            }
+            if (installed && !broken && request.args[0] === 'config' && request.args.includes('--list')) {
+                broken = true;
+                return Promise.reject(new Error('config broke'));
+            }
+            return first.run(request);
+        },
+        terminateAll: () => inner.terminateAll(),
+    };
+}
+
 function sleepingStub(version: string, pidsDir: string, name: string): string {
     return [
         `case "$1" in --version) echo "${version}"; exit 0;; esac`,
@@ -325,7 +345,7 @@ await test('--no-install leaves a foreign entry at the destination as it is', as
     assert.equal(fs.readFileSync(path.join(fixture.worktree, 'node_modules'), 'utf8'), 'own\n');
 });
 
-await test('a disabled sandbox network skips installs and links and names the commands', async (t) => {
+await test('a disabled sandbox network skips installs, links orphans and names the project commands', async (t) => {
     const fixture = makeFixture(t, {
         files: { ...ROOT_NPM, 'services/api/uv.lock': 'version = 1\n' },
         stubs: { npm: NPM_STUB, uv: UV_STUB },
@@ -335,14 +355,37 @@ await test('a disabled sandbox network skips installs and links and names the co
     });
     await runInstallStage(fixture.request);
     assert.deepEqual(managerCalls(fixture), []);
-    for (const rel of ['node_modules', 'services/api/.venv', '.venv']) {
+    for (const rel of ['node_modules', 'services/api/.venv']) {
         assert.equal(fs.existsSync(path.join(fixture.worktree, rel)), false, rel);
         assert.equal(linkText(path.join(fixture.worktree, rel)), undefined, rel);
     }
+    assertOwnLink(fixture, '.venv');
     assert.deepEqual(infos(fixture), [
         'installs skipped: the network is disabled in this sandbox; dependency folders stay missing; ' +
             'run later in the worktree: npm ci; cd services/api && uv sync --frozen',
     ]);
+    const orphan = warnings(fixture);
+    assert.equal(orphan.length, 1, dump(fixture));
+    assert.match(orphan[0] ?? '', /^not installed: \.venv is a Python environment with no uv\.lock next to it/u);
+    assert.match(orphan[0] ?? '', /linked it; do not run installs in this worktree until the link is removed$/u);
+});
+
+await test('a disabled sandbox network with only an orphan names no command', async (t) => {
+    const fixture = makeFixture(t, {
+        files: { 'uv.lock': 'version = 1\n' },
+        stubs: { uv: UV_STUB },
+        mainFolders: ['node_modules'],
+        depRels: ['node_modules'],
+        extraEnv: { [SANDBOX_NETWORK_VARIABLE]: '1' },
+    });
+    await runInstallStage(fixture.request);
+    assert.deepEqual(managerCalls(fixture), []);
+    assertOwnLink(fixture, 'node_modules');
+    assert.deepEqual(infos(fixture), [
+        'installs skipped: the network is disabled in this sandbox; dependency folders stay missing; ' +
+            'run later in the worktree: uv sync --frozen',
+    ]);
+    assert.equal(warnings(fixture).filter((line) => line.includes('node_modules')).length, 1, dump(fixture));
 });
 
 await test('--no-install wins over the sandbox switch', async (t) => {
@@ -521,7 +564,7 @@ await test('exclude patterns are written first, so a link stays out of git statu
     assert.equal(status, '');
 });
 
-await test('a config change is reverted when the stage throws after the manager ran', async (t) => {
+await test('a config change is reverted when the project throws after the manager ran', async (t) => {
     const fixture = makeFixture(t, {
         files: ROOT_NPM,
         stubs: { npm: NPM_CONFIG_FAIL_STUB },
@@ -530,11 +573,102 @@ await test('a config change is reverted when the stage throws after the manager 
         wrap: throwAfterInstall,
     });
     const before = sharedConfig(fixture);
-    await assert.rejects(runInstallStage(fixture.request), /runner broke/u);
+    await runInstallStage(fixture.request);
     assert.equal(managerCalls(fixture).filter((call) => isInstall(call)).length, 1, dump(fixture));
     assert.equal(sharedConfig(fixture), before);
-    const reverted = warnings(fixture).filter((line) => line.startsWith('reverted core.hookspath'));
+    const warned = warnings(fixture);
+    assert.ok(warned.includes('cannot install dependencies in the worktree root: runner broke'), dump(fixture));
+    const reverted = warned.filter((line) => line.startsWith('reverted core.hookspath'));
     assert.equal(reverted.length, 1, dump(fixture));
+});
+
+await test('a project that throws is a warning and the next project still installs', async (t) => {
+    const fixture = makeFixture(t, {
+        files: { ...ROOT_NPM, 'services/api/uv.lock': 'version = 1\n' },
+        stubs: { npm: NPM_CONFIG_FAIL_STUB, uv: UV_STUB },
+        mainFolders: ['services/api/.venv'],
+        depRels: ['services/api/.venv'],
+        wrap: throwAfterInstall,
+    });
+    await runInstallStage(fixture.request);
+    assert.ok(
+        warnings(fixture).includes('cannot install dependencies in the worktree root: runner broke'),
+        dump(fixture)
+    );
+    assert.ok(
+        infos(fixture).some((line) => line.startsWith('installed dependencies with uv in services/api in ')),
+        dump(fixture)
+    );
+    assert.ok(fs.statSync(path.join(fixture.worktree, 'services', 'api', '.venv')).isDirectory());
+});
+
+await test('a revert that throws after a project that threw reports both', async (t) => {
+    const fixture = makeFixture(t, {
+        files: { ...ROOT_NPM, 'services/api/uv.lock': 'version = 1\n' },
+        stubs: { npm: NPM_CONFIG_FAIL_STUB, uv: UV_STUB },
+        mainFolders: ['services/api/.venv'],
+        depRels: ['services/api/.venv'],
+        wrap: throwAndBreakRevert,
+    });
+    await runInstallStage(fixture.request);
+    const warned = warnings(fixture);
+    assert.ok(warned.includes('cannot install dependencies in the worktree root: runner broke'), dump(fixture));
+    assert.ok(
+        warned.includes(
+            'cannot revert the shared repository config after installing in the worktree root: config broke'
+        ),
+        dump(fixture)
+    );
+    assert.ok(
+        infos(fixture).some((line) => line.startsWith('installed dependencies with uv in services/api in ')),
+        dump(fixture)
+    );
+});
+
+await test('a nested node_modules outside any workspace does not block the root install in a reused worktree', async (t) => {
+    const fixture = makeFixture(t, {
+        files: ROOT_NPM,
+        stubs: { npm: NPM_STUB },
+        mainFolders: ['node_modules', 'tools/x/node_modules'],
+        depRels: ['node_modules', 'tools/x/node_modules'],
+    });
+    const nested = path.join(fixture.worktree, 'tools', 'x', 'node_modules');
+    fs.mkdirSync(nested, { recursive: true });
+    fs.writeFileSync(path.join(nested, 'own.txt'), 'own\n');
+    await runInstallStage(fixture.request);
+    assert.ok(
+        infos(fixture).some((line) => line.startsWith('installed dependencies with npm in ')),
+        dump(fixture)
+    );
+    assert.deepEqual(warnings(fixture), [
+        'not installed: tools/x/node_modules belongs to no project with a supported lock file; ' +
+            'it already stands in the worktree and is left as it is',
+    ]);
+    assert.equal(fs.readFileSync(path.join(nested, 'own.txt'), 'utf8'), 'own\n');
+});
+
+await test('a nested node_modules of a workspace member belongs to the root install', async (t) => {
+    const fixture = makeFixture(t, {
+        files: { ...ROOT_NPM, 'package.json': '{"name":"demo","workspaces":{"packages":["tools/*"]}}\n' },
+        stubs: { npm: NPM_STUB },
+        mainFolders: ['node_modules', 'tools/x/node_modules'],
+        depRels: ['node_modules', 'tools/x/node_modules'],
+    });
+    const nested = path.join(fixture.worktree, 'tools', 'x', 'node_modules');
+    fs.mkdirSync(nested, { recursive: true });
+    await runInstallStage(fixture.request);
+    assert.deepEqual(
+        managerCalls(fixture).filter((call) => isInstall(call)),
+        [],
+        dump(fixture)
+    );
+    assert.ok(
+        warnings(fixture).includes(
+            'not installed with npm: tools/x/node_modules already stands in the worktree and is left as it is ' +
+                '(remove it and rerun to install)'
+        ),
+        dump(fixture)
+    );
 });
 
 await test('a config change made by a failed install is reverted too', async (t) => {

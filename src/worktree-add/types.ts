@@ -4,7 +4,7 @@ export interface CommandRequest {
     file: string;
     args: readonly string[];
     cwd?: string;
-    // String values add to or override the runner env for this child only; undefined values are ignored.
+    // String values add to or override the runner env for this child only; an undefined value removes that name for this child.
     env?: Env;
     timeoutMs?: number;
 }

@@ -1,7 +1,7 @@
 import path from 'node:path';
 
 import { maskSecrets } from './mask.ts';
-import { showText } from './text.ts';
+import { failureLine, showText } from './text.ts';
 import type { CommandResult, Deps, Env } from './types.ts';
 
 export interface ConfigSnapshot {
@@ -16,14 +16,8 @@ const UNSET = '(unset)';
 const UNKNOWN = '(unknown)';
 const HIDDEN = '***';
 const SENSITIVE_KEY = /extraheader|password|passwd|token|secret|cookie|credential|auth/iu;
-
-function failureLine(result: CommandResult): string {
-    if (result.spawnError !== undefined) {
-        return result.spawnError;
-    }
-    const [first = ''] = result.stderr.trim().split('\n', 1);
-    return first.length > 0 ? first : `git exited with code ${String(result.code)}`;
-}
+// push -u, branch --set-upstream-to and remote add from another worktree write these while the install runs.
+const CONCURRENT_SECTIONS: ReadonlySet<string> = new Set(['branch', 'remote']);
 
 function configGit(deps: Deps, file: string, args: readonly string[]): Promise<CommandResult> {
     return deps.runner.run({ file: 'git', args: ['config', '--file', file, ...args] });
@@ -78,6 +72,12 @@ async function currentValues(deps: Deps, env: Env, file: string, key: string): P
     return read.ok ? shownValues(key, read.entries.get(key) ?? [], env) : UNKNOWN;
 }
 
+// Git compares section names without case (the subsection keeps its case), so the section is lowercased here.
+function isConcurrentKey(key: string): boolean {
+    const [section = ''] = key.split('.', 1);
+    return CONCURRENT_SECTIONS.has(section.toLowerCase());
+}
+
 // Undefined when the folder is not a git checkout or its shared config cannot be read.
 export async function snapshotSharedConfig(deps: Deps, worktree: string): Promise<ConfigSnapshot | undefined> {
     const result = await deps.runner.run({ file: 'git', args: ['-C', worktree, 'rev-parse', '--git-common-dir'] });
@@ -111,7 +111,8 @@ async function restoreKey(
 }
 
 // Every key whose value list differs from the snapshot gets the recorded values back; returns the reverted keys.
-// It cannot tell the installs apart from anything else, so a change made by another process meanwhile is reverted too.
+// branch.* and remote.* keys are left alone, as other worktrees set them concurrently; any other change made by
+// another process meanwhile cannot be told apart from the installs and is reverted too.
 export async function revertConfigChanges(deps: Deps, env: Env, snapshot: ConfigSnapshot): Promise<string[]> {
     const file = showText(snapshot.file);
     const read = await readConfig(deps, snapshot.file);
@@ -125,7 +126,7 @@ export async function revertConfigChanges(deps: Deps, env: Env, snapshot: Config
     for (const key of keys) {
         const before = snapshot.entries.get(key) ?? [];
         const after = read.entries.get(key) ?? [];
-        if (sameValues(before, after)) {
+        if (isConcurrentKey(key) || sameValues(before, after)) {
             continue;
         }
         const shownKey = showText(maskSecrets(key, env));

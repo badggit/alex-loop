@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { errorCode, isOwnLink, lstatOrUndefined, parentInside } from './paths.ts';
+import { errorCode, isOwnLink, JS_DEPS, lstatOrUndefined, parentInside } from './paths.ts';
 import { showText } from './text.ts';
 import type { Deps, EntryTransfer } from './types.ts';
 
@@ -18,8 +18,6 @@ interface FallbackRun {
     worktree: string;
     transfer: EntryTransfer;
 }
-
-const CLONED_NAME = 'node_modules';
 
 // An own link already standing counts as linked; a foreign entry that appears before the link is made is present.
 function ensureLink(run: FallbackRun, rel: string): FallbackKind {
@@ -63,7 +61,7 @@ async function fallbackFor(run: FallbackRun, rel: string): Promise<FallbackKind>
     if (!parentInside(run.worktree, rel) || !destinationOpen(run, rel)) {
         return 'present';
     }
-    if (path.posix.basename(rel) === CLONED_NAME) {
+    if (path.posix.basename(rel) === JS_DEPS) {
         return cloneOrLink(run, rel);
     }
     return ensureLink(run, rel);

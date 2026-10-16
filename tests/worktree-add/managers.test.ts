@@ -6,7 +6,6 @@ import { test, type TestContext } from 'node:test';
 import {
     checkManagerVersion,
     chooseManager,
-    displayName,
     executableOf,
     type ExpectedVersion,
     type ManagerChoice,
@@ -211,9 +210,8 @@ await test('a berry pin next to a berry lock still pins the exact major', (t) =>
 await test('both yarn kinds run the yarn executable', () => {
     assert.equal(executableOf('yarn-classic'), 'yarn');
     assert.equal(executableOf('yarn-berry'), 'yarn');
-    assert.equal(displayName('yarn-berry'), 'yarn');
     assert.equal(executableOf('pnpm'), 'pnpm');
-    assert.equal(displayName('uv'), 'uv');
+    assert.equal(executableOf('uv'), 'uv');
 });
 
 await test('a stub yarn 1 against a berry expectation is a mismatch', async (t) => {

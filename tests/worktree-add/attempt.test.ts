@@ -5,7 +5,7 @@ import { test, type TestContext } from 'node:test';
 
 import { installCommand, runInstall, type AttemptRequest } from '../../src/worktree-add/attempt.ts';
 import { createProcessRunner } from '../../src/worktree-add/proc.ts';
-import type { CommandRequest, ManagerName } from '../../src/worktree-add/types.ts';
+import type { CommandRequest, Env, ManagerName } from '../../src/worktree-add/types.ts';
 
 import { testDeps } from './support/deps.ts';
 import { recording } from './support/runners.ts';
@@ -24,7 +24,7 @@ interface Setup {
 }
 
 // A project with package-lock.json and a stub NAME running body on a PATH holding only the base tools.
-function setup(t: TestContext, name: string, body: string, manager: ManagerName = 'npm'): Setup {
+function setup(t: TestContext, name: string, body: string, manager: ManagerName = 'npm', extraEnv: Env = {}): Setup {
     const root = tempRoot(t);
     const bin = isolatedBin(root);
     writeStubTool(bin, name, body);
@@ -32,7 +32,7 @@ function setup(t: TestContext, name: string, body: string, manager: ManagerName 
     fs.mkdirSync(projectDir);
     const lock = path.join(projectDir, 'package-lock.json');
     fs.writeFileSync(lock, LOCK_TEXT);
-    const runner = recording(createProcessRunner(withPath(process.env, bin)));
+    const runner = recording(createProcessRunner({ ...withPath(process.env, bin), ...extraEnv }));
     t.after(() => runner.terminateAll());
     const deps = testDeps(withPath(process.env, bin), { runner });
     const request = (overrides?: Partial<AttemptRequest>): AttemptRequest => ({
@@ -114,6 +114,30 @@ await test('uv gets its HTTP limits only in the online attempt', async (t) => {
     assert.equal(calls[1]?.env?.UV_HTTP_CONNECT_TIMEOUT, '10');
     assert.equal(result.ok, true);
     assert.equal(result.online, true);
+});
+
+await test('uv runs without an inherited UV_PROJECT_ENVIRONMENT or VIRTUAL_ENV in both attempts', async (t) => {
+    const body = [
+        'case "$*" in *--offline*) mode=offline;; *) mode=online;; esac',
+        'echo "$mode project=${UV_PROJECT_ENVIRONMENT-unset} venv=${VIRTUAL_ENV-unset} keep=${WTA_KEEP-unset}"',
+        'if [ "$mode" = offline ]; then echo "error: pkg was not found in the cache" >&2; exit 2; fi',
+        'exit 0',
+    ].join('\n');
+    const outside = { UV_PROJECT_ENVIRONMENT: '/elsewhere/env', VIRTUAL_ENV: '/elsewhere/venv', WTA_KEEP: 'kept' };
+    const { deps, calls, request } = setup(t, 'uv', body, 'uv', outside);
+    const result = await runInstall(deps, request());
+    assert.equal(calls.length, 2);
+    assert.match(result.output, /offline project=unset venv=unset keep=kept/);
+    assert.match(result.output, /online project=unset venv=unset keep=kept/);
+    assert.equal(result.ok, true);
+});
+
+await test('npm keeps an inherited VIRTUAL_ENV', async (t) => {
+    const { deps, request } = setup(t, 'npm', 'echo "venv=${VIRTUAL_ENV-unset}"\nexit 0', 'npm', {
+        VIRTUAL_ENV: '/elsewhere/venv',
+    });
+    const result = await runInstall(deps, request());
+    assert.match(result.output, /venv=\/elsewhere\/venv/);
 });
 
 await test('yarn berry runs one online attempt with YARN_HTTP_TIMEOUT', async (t) => {

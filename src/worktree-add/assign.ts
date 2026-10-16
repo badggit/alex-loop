@@ -1,4 +1,5 @@
 import type { Ecosystem, Project } from './discover.ts';
+import { JS_DEPS, UV_VENV } from './paths.ts';
 
 export interface AssignedProject extends Project {
     depRels: readonly string[];
@@ -10,9 +11,6 @@ export interface Assignment {
     projects: readonly AssignedProject[];
     orphans: readonly string[];
 }
-
-const JS_DEPS = 'node_modules';
-const UV_VENV = '.venv';
 
 function splitRel(rel: string): { parent: string; name: string } {
     const slash = rel.lastIndexOf('/');
@@ -38,8 +36,17 @@ function nearestOwner(projects: readonly Project[], ecosystem: Ecosystem, folder
     return best;
 }
 
+// Answers whether FOLDER, relative to the worktree, is a workspace member of PROJECT.
+export type WorkspaceCheck = (_project: Project, _folder: string) => boolean;
+
 // Assigns each main-clone dependency folder to the project that owns it; everything else is Python by convention.
-export function assignDependencies(projects: readonly Project[], depRels: readonly string[]): Assignment {
+// A node_modules below a JS project but not in its own folder is the project's only when that folder is one of its
+// workspace members, since a single install there never makes it.
+export function assignDependencies(
+    projects: readonly Project[],
+    depRels: readonly string[],
+    isMember: WorkspaceCheck
+): Assignment {
     const installs: string[][] = projects.map(() => []);
     const reports: string[][] = projects.map(() => []);
     const orphans: string[] = [];
@@ -47,12 +54,16 @@ export function assignDependencies(projects: readonly Project[], depRels: readon
         const { parent, name } = splitRel(rel);
         const ecosystem: Ecosystem = name === JS_DEPS ? 'js' : 'uv';
         const owner = nearestOwner(projects, ecosystem, parent);
-        if (owner === undefined) {
+        const project = owner === undefined ? undefined : projects[owner];
+        if (
+            owner === undefined ||
+            project === undefined ||
+            (ecosystem === 'js' && parent !== project.dir && !isMember(project, parent))
+        ) {
             orphans.push(rel);
             continue;
         }
-        const ownerDir = projects[owner]?.dir;
-        const installed = ecosystem === 'js' || (name === UV_VENV && parent === ownerDir);
+        const installed = ecosystem === 'js' || (name === UV_VENV && parent === project.dir);
         (installed ? installs : reports)[owner]?.push(rel);
     }
     const assigned = projects.map((project, index): AssignedProject => {

@@ -4,7 +4,7 @@ import { assignDependencies, type AssignedProject } from './assign.ts';
 import { installCommand } from './attempt.ts';
 import { revertConfigChanges, snapshotSharedConfig, type ConfigSnapshot } from './configGuard.ts';
 import { createDeadline, INSTALL_PHASE_MS, MIN_START_MS } from './deadline.ts';
-import { discoverProjects } from './discover.ts';
+import { discoverProjects, isWorkspaceMember } from './discover.ts';
 import { addExcludePatterns, anchoredPattern } from './exclude.ts';
 import { failureLines } from './failures.ts';
 import { applyFallback, type FallbackKind, type FallbackResult } from './fallback.ts';
@@ -15,10 +15,10 @@ import {
     type ProjectContext,
     type ProjectOutcome,
 } from './installProject.ts';
-import { chooseManager, displayName } from './managers.ts';
-import { lstatOrUndefined } from './paths.ts';
+import { chooseManager, executableOf, type ManagerChoice } from './managers.ts';
+import { JS_DEPS, lstatOrUndefined } from './paths.ts';
 import { privateDir } from './privateArea.ts';
-import { showText } from './text.ts';
+import { messageOf, showText } from './text.ts';
 import type { Deps, EntryTransfer, Env } from './types.ts';
 
 export interface InstallTiming {
@@ -52,12 +52,18 @@ export const SANDBOX_NETWORK_VARIABLE = 'CODEX_SANDBOX_NETWORK_DISABLED';
 const CONFLICT_COMMAND = "install with the project's package manager";
 const CONFLICT_MANAGER = 'the package manager';
 const NOT_STARTED = 'the install phase ended before it started';
-const JS_DEPS = 'node_modules';
-const NO_INSTALL_GROUPS: readonly (readonly [FallbackKind, string])[] = [
-    ['cloned', 'cloned'],
-    ['linked', 'linked'],
-    ['present', 'left as it is'],
-    ['failed', 'failed'],
+type GroupText = (_shown: string) => string;
+const NO_INSTALL_GROUPS: readonly (readonly [FallbackKind, GroupText])[] = [
+    ['cloned', (shown) => `cloned ${shown}`],
+    ['linked', (shown) => `linked ${shown}`],
+    ['present', (shown) => `left as it is ${shown}`],
+    ['failed', (shown) => `failed ${shown}`],
+];
+const TOOL_MISSING_GROUPS: readonly (readonly [FallbackKind, GroupText])[] = [
+    ['linked', (shown) => `linked ${shown} meanwhile`],
+    ['cloned', (shown) => `cloned ${shown} meanwhile`],
+    ['present', (shown) => `${shown} already stand in the worktree and are left as they are`],
+    ['failed', (shown) => `${shown} stay missing`],
 ];
 const ORPHAN_KIND_TEXT: Readonly<Record<FallbackKind, string>> = {
     cloned: 'cloned it',
@@ -71,47 +77,62 @@ interface ShownCommand {
     command: string;
 }
 
+// The manager is chosen once per project, so every report line shows the command the install runs.
+interface PlannedProject {
+    project: AssignedProject;
+    choice: ManagerChoice;
+}
+
 function shownList(rels: readonly string[]): string {
     return rels.map((rel) => showText(rel)).join(', ');
 }
 
-function relsOfKind(results: readonly FallbackResult[], kind: FallbackKind): string[] {
-    return results.filter((result) => result.kind === kind).map((result) => result.rel);
+// One text per fallback kind that has results, in the order of the groups.
+function groupTexts(
+    results: readonly FallbackResult[],
+    groups: readonly (readonly [FallbackKind, GroupText])[]
+): string[] {
+    return groups
+        .map(([kind, text]) => ({ text, rels: results.filter((result) => result.kind === kind) }))
+        .filter((group) => group.rels.length > 0)
+        .map((group) => group.text(shownList(group.rels.map((result) => result.rel))));
 }
 
 function paths(request: InstallStageRequest): { main: string; worktree: string } {
     return { main: request.main, worktree: request.worktree };
 }
 
-function commandOf(request: InstallStageRequest, project: AssignedProject): ShownCommand {
-    const choice = chooseManager(path.join(request.worktree, project.dir), project.ecosystem, project.lockNames);
+function commandOf({ project, choice }: PlannedProject): ShownCommand {
     if (choice.kind === 'conflict') {
         return { manager: CONFLICT_MANAGER, command: CONFLICT_COMMAND };
     }
     return {
-        manager: displayName(choice.manager),
+        manager: executableOf(choice.manager),
         command: projectCommand(project, installCommand(choice.manager)),
     };
 }
 
 async function skipAll(request: InstallStageRequest): Promise<void> {
     const results = await applyFallback(request.deps, paths(request), request.transfer, request.depRels);
-    const groups = NO_INSTALL_GROUPS.map(([kind, text]) => ({ text, rels: relsOfKind(results, kind) }))
-        .filter((group) => group.rels.length > 0)
-        .map((group) => `${group.text} ${shownList(group.rels)}`);
+    const groups = groupTexts(results, NO_INSTALL_GROUPS);
     const summary = groups.length === 0 ? 'no dependency folders in the main clone' : groups.join('; ');
     request.deps.log.info(`installs skipped (--no-install): ${summary}`);
 }
 
-function reportManual(request: InstallStageRequest, projects: readonly AssignedProject[]): void {
-    for (const project of projects) {
-        const { command } = commandOf(request, project);
+function projectPlace(project: AssignedProject): string {
+    return project.dir === '' ? 'the worktree root' : showText(project.dir);
+}
+
+function reportManual(request: InstallStageRequest, planned: readonly PlannedProject[]): void {
+    for (const plan of planned) {
+        const { project } = plan;
+        const { command } = commandOf(plan);
         const run = `(run in the worktree: ${showText(command)})`;
         if (!project.auto) {
             request.deps.log.info(`not installed automatically: ${showText(project.dir)} ${run}`);
             continue;
         }
-        const where = project.dir === '' ? 'the worktree root' : showText(project.dir);
+        const where = projectPlace(project);
         for (const folder of project.reportOnly) {
             request.deps.log.info(
                 `not installed automatically: ${showText(folder)} belongs to the uv project in ${where} ${run}`
@@ -120,8 +141,8 @@ function reportManual(request: InstallStageRequest, projects: readonly AssignedP
     }
 }
 
-function reportSandbox(request: InstallStageRequest, projects: readonly AssignedProject[]): void {
-    const commands = projects.map((project) => showText(commandOf(request, project).command));
+function reportSandbox(request: InstallStageRequest, planned: readonly PlannedProject[]): void {
+    const commands = planned.map((plan) => showText(commandOf(plan).command));
     const tail = commands.length === 0 ? '' : `; run later in the worktree: ${commands.join('; ')}`;
     request.deps.log.info(
         `installs skipped: the network is disabled in this sandbox; dependency folders stay missing${tail}`
@@ -149,24 +170,7 @@ function toolMissingTail(project: AssignedProject, results: readonly FallbackRes
     if (results.length === 0) {
         return `nothing to link: ${shownList(targetFolders(project))} stays missing`;
     }
-    const parts: string[] = [];
-    const linked = relsOfKind(results, 'linked');
-    const cloned = relsOfKind(results, 'cloned');
-    const present = relsOfKind(results, 'present');
-    const failed = relsOfKind(results, 'failed');
-    if (linked.length > 0) {
-        parts.push(`linked ${shownList(linked)} meanwhile`);
-    }
-    if (cloned.length > 0) {
-        parts.push(`cloned ${shownList(cloned)} meanwhile`);
-    }
-    if (present.length > 0) {
-        parts.push(`${shownList(present)} already stand in the worktree and are left as they are`);
-    }
-    if (failed.length > 0) {
-        parts.push(`${shownList(failed)} stay missing`);
-    }
-    return parts.join('; ');
+    return groupTexts(results, TOOL_MISSING_GROUPS).join('; ');
 }
 
 async function handleToolMissing(
@@ -184,8 +188,9 @@ async function handleToolMissing(
     );
 }
 
-function reportNotStarted(request: InstallStageRequest, project: AssignedProject): void {
-    const { manager, command } = commandOf(request, project);
+function reportNotStarted(request: InstallStageRequest, plan: PlannedProject): void {
+    const { project } = plan;
+    const { manager, command } = commandOf(plan);
     const missing = targetFolders(project).filter(
         (rel) => lstatOrUndefined(path.join(request.worktree, rel)) === undefined
     );
@@ -216,10 +221,38 @@ async function takeSnapshot(request: InstallStageRequest): Promise<ConfigSnapsho
     return snapshot;
 }
 
-// The shared config is reverted after every project, also when its install throws, so no change made by a
-// manager outlives the stage.
-async function installAll(request: InstallStageRequest, projects: readonly AssignedProject[]): Promise<void> {
-    if (projects.length === 0) {
+// The shared config is reverted after the project, also when its install throws, so no change made by a manager
+// outlives the stage; a throw is a warning naming the project, and a failed revert does not hide it.
+async function installOne(
+    request: InstallStageRequest,
+    run: { ctx: ProjectContext; snapshot: ConfigSnapshot | undefined },
+    { project, choice }: PlannedProject,
+    untilMs: number
+): Promise<void> {
+    const { deps, env } = request;
+    let outcome: ProjectOutcome | undefined;
+    try {
+        outcome = await installProject(run.ctx, project, untilMs, choice);
+    } catch (error) {
+        deps.log.warn(`cannot install dependencies in ${projectPlace(project)}: ${messageOf(error)}`);
+    }
+    if (run.snapshot !== undefined) {
+        try {
+            await revertConfigChanges(deps, env, run.snapshot);
+        } catch (error) {
+            deps.log.warn(
+                `cannot revert the shared repository config after installing in ${projectPlace(project)}: ` +
+                    messageOf(error)
+            );
+        }
+    }
+    if (outcome?.kind === 'tool-missing') {
+        await handleToolMissing(request, project, outcome.manager);
+    }
+}
+
+async function installAll(request: InstallStageRequest, planned: readonly PlannedProject[]): Promise<void> {
+    if (planned.length === 0) {
         return;
     }
     const { deps, env, timing, nowMs } = request;
@@ -235,22 +268,12 @@ async function installAll(request: InstallStageRequest, projects: readonly Assig
     };
     const snapshot = await takeSnapshot(request);
     const deadline = createDeadline(request.startedMs, timing.phaseMs, nowMs);
-    for (const [index, project] of projects.entries()) {
+    for (const [index, plan] of planned.entries()) {
         if (deadline.remainingMs() < MIN_START_MS) {
-            reportNotStarted(request, project);
+            reportNotStarted(request, plan);
             continue;
         }
-        let outcome: ProjectOutcome;
-        try {
-            outcome = await installProject(ctx, project, nowMs() + deadline.shareMs(projects.length - index));
-        } finally {
-            if (snapshot !== undefined) {
-                await revertConfigChanges(deps, env, snapshot);
-            }
-        }
-        if (outcome.kind === 'tool-missing') {
-            await handleToolMissing(request, project, outcome.manager);
-        }
+        await installOne(request, { ctx, snapshot }, plan, nowMs() + deadline.shareMs(planned.length - index));
     }
 }
 
@@ -272,13 +295,20 @@ export async function runInstallStage(request: InstallStageRequest): Promise<voi
         deps.log.warn('cannot list the lock files of the worktree; no dependencies installed');
         return;
     }
-    const assignment = assignDependencies(found, depRels);
-    reportManual(request, assignment.projects);
-    const autoProjects = assignment.projects.filter((project) => project.auto);
+    const assignment = assignDependencies(found, depRels, (project, folder) =>
+        isWorkspaceMember(worktree, project, folder)
+    );
+    const planned = assignment.projects.map((project) => ({
+        project,
+        choice: chooseManager(path.join(worktree, project.dir), project.ecosystem, project.lockNames),
+    }));
+    reportManual(request, planned);
+    const autoProjects = planned.filter((plan) => plan.project.auto);
+    // Cloning or linking an orphan needs no network, so it runs in the sandbox too.
+    await handleOrphans(request, assignment.orphans);
     if (request.env[SANDBOX_NETWORK_VARIABLE] === '1') {
         reportSandbox(request, autoProjects);
         return;
     }
-    await handleOrphans(request, assignment.orphans);
     await installAll(request, autoProjects);
 }

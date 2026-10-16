@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import type { Ecosystem } from './discover.ts';
+import { SPAWN_FAILED_CODE } from './proc.ts';
 import type { CommandResult, Deps, ManagerName } from './types.ts';
 
 export interface ExpectedVersion {
@@ -33,7 +34,6 @@ export const VERSION_TIMEOUT_MS = 20_000;
 
 // Lock headers and .yarnrc.yml settings sit near the top, so a large lock is never read whole.
 const HEAD_BYTES = 64 * 1024;
-const SPAWN_FAILED_CODE = 127;
 
 const LOCK_FAMILIES: ReadonlyMap<string, JsFamily> = new Map([
     ['package-lock.json', 'npm'],
@@ -68,10 +68,6 @@ const PNPM_LOCK_MAJORS: ReadonlyMap<number, readonly number[]> = new Map([
 ]);
 
 export function executableOf(manager: ManagerName): string {
-    return EXECUTABLES[manager];
-}
-
-export function displayName(manager: ManagerName): string {
     return EXECUTABLES[manager];
 }
 
@@ -283,7 +279,7 @@ export async function checkManagerVersion(
     if (result.code === SPAWN_FAILED_CODE && result.spawnError === 'ENOENT') {
         return { kind: 'missing' };
     }
-    const expectedText = expected?.text ?? `${displayName(manager)} (any version)`;
+    const expectedText = expected?.text ?? `${executableOf(manager)} (any version)`;
     if (result.code !== 0 || result.timedOut === true) {
         return { kind: 'mismatch', expected: expectedText, found: `unknown (${failureReason(result, timeoutMs)})` };
     }

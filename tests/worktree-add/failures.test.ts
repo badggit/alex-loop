@@ -106,6 +106,19 @@ await test('classifyFailure keeps a plain packageManager mismatch as wrong-versi
     assert.equal(classify(output), 'wrong-version');
 });
 
+await test('classifyFailure ranks a lock file out of sync above a corepack mention', () => {
+    const output = [
+        'Corepack is about to download https://repo.yarnpkg.com/4.1.0/packages/yarnpkg-cli/bin/yarn.js',
+        'YN0028: The lockfile would have been modified by this install, which is explicitly forbidden.',
+    ].join('\n');
+    assert.equal(classify(output), 'lock-out-of-sync');
+});
+
+await test('classifyFailure ranks a timeout above a corepack mention', () => {
+    const output = 'Corepack is about to download https://registry.npmjs.org/pnpm/-/pnpm-9.0.0.tgz\nresolving packages';
+    assert.equal(classify(output, 143, true), 'timeout');
+});
+
 await test('classifyFailure ignores a 403 inside a tarball version in the URL', () => {
     const output =
         'npm error code ECONNRESET\nnpm error network GET https://registry.example.test/pkg/-/pkg-1.403.0.tgz';

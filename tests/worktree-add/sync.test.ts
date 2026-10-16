@@ -329,7 +329,7 @@ await test('a failing listing warns and creates nothing', async (t) => {
     const transfer = fakeTransfer();
     assert.equal(await syncIgnored(failing, main, worktree, transfer), undefined);
     assert.deepEqual(messages(deps.lines), [
-        `warn cannot list the ignored files of ${main}; nothing synced into the worktree`,
+        `warn cannot list the ignored files of ${main}; nothing synced into the worktree and the dependency fallback is skipped`,
     ]);
     assert.deepEqual(fs.readdirSync(worktree).toSorted(), before);
     assert.deepEqual(transfer.copies, []);

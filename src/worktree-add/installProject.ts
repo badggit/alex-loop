@@ -4,9 +4,15 @@ import type { AssignedProject } from './assign.ts';
 import { installCommand, runInstall, type AttemptResult } from './attempt.ts';
 import { removalCommand, removeNewEntries, removeSafely, shellQuote, untrackedEntries } from './cleanup.ts';
 import { classifyFailure, failureLines, keyErrorLines, lastLifecycleStep, type FailureReport } from './failures.ts';
-import { checkManagerVersion, chooseManager, displayName, VERSION_TIMEOUT_MS } from './managers.ts';
+import {
+    checkManagerVersion,
+    chooseManager,
+    executableOf,
+    VERSION_TIMEOUT_MS,
+    type ManagerChoice,
+} from './managers.ts';
 import { maskSecrets } from './mask.ts';
-import { isOwnLink, lstatOrUndefined } from './paths.ts';
+import { isOwnLink, JS_DEPS, lstatOrUndefined, UV_VENV } from './paths.ts';
 import { addPartialMarks, clearPartialMarks, logFileName, readPartialMarks, writeInstallLog } from './privateArea.ts';
 import { showText } from './text.ts';
 import type { Deps, Env, ManagerName } from './types.ts';
@@ -38,7 +44,7 @@ const SHELL_SAFE = /^[\w./-]+$/u;
 const NO_PRIVATE_DIR = 'the worktree has no private git folder';
 
 function defaultFolder(project: AssignedProject): string {
-    const name = project.ecosystem === 'js' ? 'node_modules' : '.venv';
+    const name = project.ecosystem === 'js' ? JS_DEPS : UV_VENV;
     return project.dir === '' ? name : `${project.dir}/${name}`;
 }
 
@@ -47,7 +53,7 @@ export function targetFolders(project: AssignedProject): string[] {
 }
 
 function shellWord(text: string): string {
-    return SHELL_SAFE.test(text) ? text : `'${text.replaceAll("'", String.raw`'\''`)}'`;
+    return SHELL_SAFE.test(text) ? text : shellQuote(text);
 }
 
 export function projectCommand(project: AssignedProject, command: string): string {
@@ -91,7 +97,7 @@ function clearMarks(run: Run, rels: readonly string[]): void {
 function logGroup(run: Run, report: Omit<FailureReport, 'manager' | 'where' | 'command' | 'missing'>): void {
     const lines = failureLines({
         ...report,
-        manager: displayName(run.manager),
+        manager: executableOf(run.manager),
         where: run.project.dir,
         command: projectCommand(run.project, installCommand(run.manager)),
         missing: missingTargets(run),
@@ -190,7 +196,7 @@ function saveLog(run: Run, output: string): { logPath: string | undefined; logPr
     if (dir === undefined) {
         return { logPath: undefined, logProblem: NO_PRIVATE_DIR };
     }
-    const written = writeInstallLog(dir, logFileName(displayName(run.manager), run.project.dir), output);
+    const written = writeInstallLog(dir, logFileName(executableOf(run.manager), run.project.dir), output);
     return written.ok
         ? { logPath: written.path, logProblem: undefined }
         : { logPath: undefined, logProblem: written.reason };
@@ -205,8 +211,8 @@ function warnUnlisted(run: Run, reason: string): void {
     );
 }
 
-// The target folders were absent before the install (checked and unlinked above), so whatever stands there now is
-// the install's own; they are removed by name too because one inside a folder that was already untracked before
+// Only the manager's own new entries go (see removeNewEntries); a new file of the user's stays. The target folders
+// were absent before the install (checked and unlinked above), so whatever stands there now is the install's own; they are removed by name too because one inside a folder that was already untracked before
 // is hidden in the listing behind that folder. Leftovers replace the target folders in the marker.
 async function cleanUp(run: Run, before: ReadonlySet<string>): Promise<void> {
     const removed = await removeNewEntries(run.ctx.deps, projectPath(run), before);
@@ -308,21 +314,22 @@ async function installChecked(run: Run, deadlineMs: number): Promise<ProjectOutc
 }
 
 // Installs one project from its own lock files; every problem is logged here except a missing tool, which the
-// stage reports together with its fallback.
+// stage reports together with its fallback. The stage passes the manager it already chose for its report lines.
 export async function installProject(
     ctx: ProjectContext,
     project: AssignedProject,
-    deadlineMs: number
+    deadlineMs: number,
+    chosen?: ManagerChoice
 ): Promise<ProjectOutcome> {
     const projectDir = path.join(ctx.worktree, project.dir);
-    const choice = chooseManager(projectDir, project.ecosystem, project.lockNames);
+    const choice = chosen ?? chooseManager(projectDir, project.ecosystem, project.lockNames);
     if (choice.kind === 'conflict') {
         const where = project.dir === '' ? 'the worktree root' : showText(project.dir);
         ctx.deps.log.warn(`cannot install dependencies in ${where}: ${showText(choice.reason)}`);
         return { kind: 'not-installed' };
     }
     const { manager } = choice;
-    const name = displayName(manager);
+    const name = executableOf(manager);
     const run: Run = {
         ctx,
         project,

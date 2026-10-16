@@ -289,25 +289,34 @@ await test('a thrown value that cannot become text is an unknown install warning
     assert.ok(logged(f, 'warn cannot install dependencies: unknown error'), f.deps.lines.join('\n'));
 });
 
-await test('a failing ignored-files listing skips the install stage with one warning', async (t) => {
+function warnLines(f: Fixture): string[] {
+    return f.deps.lines.filter((line) => line.includes(' warn '));
+}
+
+await test('a failing ignored-files listing still installs from lock files with one warning', async (t) => {
     const f = makeInstallFixture(t);
     const failed = { code: 128, stdout: '', stderr: 'fatal: broken' };
-    const runner = recording(withOverride(f.deps.runner, (request) => request.args.includes('ls-files'), failed));
+    const isIgnoredListing = (request: CommandRequest): boolean =>
+        request.args.includes('ls-files') && request.args.includes('--ignored');
+    const runner = recording(withOverride(f.deps.runner, isIgnoredListing, failed));
     f.deps.runner = runner;
-    const warning = 'warn cannot install dependencies: the ignored files of the main clone could not be listed';
-    for (const argv of [
-        ['--suffix', 'inst-5'],
-        ['--suffix', 'inst-6', '--no-install'],
-    ]) {
-        const target = okPath(await runWith(f, argv, {}));
-        assert.equal(fs.lstatSync(path.join(target, 'node_modules'), { throwIfNoEntry: false }), undefined);
-    }
-    assert.equal(f.deps.lines.filter((line) => line.includes(warning)).length, 2, f.deps.lines.join('\n'));
-    assert.equal(logged(f, 'installs skipped'), false, f.deps.lines.join('\n'));
-    assert.deepEqual(
-        runner.calls.filter((request) => path.basename(request.file) === 'npm'),
-        []
-    );
+    const warning = 'warn cannot list the ignored files of ';
+    const installed = okPath(await runWith(f, ['--suffix', 'inst-5'], {}));
+    let all = f.deps.lines.join('\n');
+    assert.deepEqual(fs.readdirSync(path.join(installed, 'node_modules')), ['from-stub'], all);
+    assert.equal(warnLines(f).length, 1, all);
+    assert.ok(warnLines(f)[0]?.includes(warning), all);
+    assert.equal(logged(f, 'cannot install dependencies'), false, all);
+    assert.equal(runner.calls.filter((request) => path.basename(request.file) === 'npm').length, 2, all);
+
+    f.deps.lines.length = 0;
+    const skipped = okPath(await runWith(f, ['--suffix', 'inst-6', '--no-install'], {}));
+    all = f.deps.lines.join('\n');
+    assert.equal(fs.lstatSync(path.join(skipped, 'node_modules'), { throwIfNoEntry: false }), undefined);
+    assert.equal(warnLines(f).length, 1, all);
+    assert.ok(warnLines(f)[0]?.includes(warning), all);
+    assert.equal(logged(f, 'installs skipped'), false, all);
+    assert.equal(runner.calls.filter((request) => path.basename(request.file) === 'npm').length, 2, all);
 });
 
 await test('an undefined timing value keeps its default', async (t) => {
@@ -317,22 +326,26 @@ await test('an undefined timing value keeps its default', async (t) => {
     assert.deepEqual(fs.readdirSync(path.join(target, 'node_modules')), ['from-stub'], f.deps.lines.join('\n'));
 });
 
-await test('a sync that throws skips the install stage and warns with the thrown message', async (t) => {
+await test('a sync that throws still installs from lock files and warns once with the thrown message', async (t) => {
     const f = makeInstallFixture(t);
     const runner = recording(rejectingFirst(f.deps.runner, (request) => request.args.includes('info/exclude')));
     f.deps.runner = runner;
     const target = okPath(await runWith(f, ['--suffix', 'inst-8'], {}));
     assert.equal(target, path.join(f.root, 'app-inst-8'));
     const all = f.deps.lines.join('\n');
-    assert.ok(logged(f, 'warn cannot sync ignored paths into the worktree: exclude broke'), all);
-    const warnings = f.deps.lines.filter((line) => line.endsWith('warn cannot install dependencies: exclude broke'));
-    assert.equal(warnings.length, 1, all);
-    assert.equal(logged(f, 'could not be listed'), false, all);
-    assert.equal(logged(f, 'installed dependencies'), false, all);
-    assert.deepEqual(
-        runner.calls.filter((request) => path.basename(request.file) === 'npm'),
-        []
+    assert.deepEqual(warnLines(f).length, 1, all);
+    assert.ok(
+        warnLines(f)[0]?.endsWith(
+            'warn cannot sync ignored paths into the worktree: exclude broke; ' +
+                'the dependency fallback from the main clone is skipped'
+        ),
+        all
     );
+    assert.equal(logged(f, 'cannot install dependencies'), false, all);
+    assert.ok(logged(f, 'info installed dependencies with npm in '), all);
+    const modules = fs.lstatSync(path.join(target, 'node_modules'));
+    assert.ok(modules.isDirectory() && !modules.isSymbolicLink(), all);
+    assert.equal(runner.calls.filter((request) => path.basename(request.file) === 'npm').length, 2, all);
 });
 
 // Each applied step that is not a new branch from main (reused, existing local, tracked remote) still installs.

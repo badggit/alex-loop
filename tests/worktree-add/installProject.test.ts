@@ -278,6 +278,16 @@ await test('a failed install is cleaned up, logged with the masked output and re
     assert.deepEqual(markerOf(fixture), []);
 });
 
+await test('a failed install removes the node_modules it made and keeps a file the user wrote meanwhile', async (t) => {
+    const fixture = await npmFixture(t, 'mkdir -p node_modules/partial\necho draft > notes.txt\nexit 1');
+    const outcome = await installProject(fixture.ctx, rootProject(), minuteAhead());
+    assert.deepEqual(outcome, { kind: 'failed' });
+    assert.equal(lstatOrUndefined(path.join(fixture.worktree, 'node_modules')), undefined);
+    assert.equal(fs.readFileSync(path.join(fixture.worktree, 'notes.txt'), 'utf8'), 'draft\n');
+    assert.deepEqual(linesWith(fixture, 'remove it with'), []);
+    assert.deepEqual(markerOf(fixture), []);
+});
+
 await test('a cleanup that cannot finish warns with a removal command and keeps the leftover marked', async (t) => {
     if (process.getuid?.() === 0) {
         t.skip('root can remove a folder with mode 0500');

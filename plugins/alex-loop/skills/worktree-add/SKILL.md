@@ -17,7 +17,11 @@ What the script does (for answering questions; never repeat its work):
 - The folder is `MAINFOLDER-SUFFIX`, next to the main clone or inside the given parent folder. The script derives the name; the skill only passes the suffix.
 - `.env`, `.env.*`, `CLAUDE.local.md` and `temp.local` are copied per worktree. Build caches are skipped. Every other ignored entry (including `docs.local` and `.claude`) is linked to the main clone.
 - Dependencies (`node_modules`, `.venv`, `venv` and any folder holding `pyvenv.cfg`) are installed per worktree from the branch's own lock files (npm, pnpm, yarn, bun, uv), not linked. A project is installed automatically when it sits at the worktree root or the main clone has its dependency folder; others get a `not installed automatically` line with the command.
-- Fallback: with `--no-install`, when the manager is not on PATH, or for a folder no supported lock file covers, `node_modules` is cloned with copy-on-write, else linked, and a Python environment is linked. When `CODEX_SANDBOX_NETWORK_DISABLED=1`, installs are skipped and the folders stay missing. A failed install is cleaned up and leaves the folder missing. A conflict between the lock files and `packageManager`, or a wrong manager version, gets no fallback either: the folders stay missing and the warning says why.
+- A nested `node_modules` without its own lock file belongs to the root JS project only when the root's `workspaces` cover that folder; otherwise it is an orphan.
+- Fallback: with `--no-install`, when the manager is not on PATH, or for an orphan (a folder no supported lock file covers), `node_modules` is cloned with copy-on-write, else linked, and a Python environment is linked. When `CODEX_SANDBOX_NETWORK_DISABLED=1`, installs are skipped and their folders stay missing, but orphans are still cloned or linked (no network needed). When the main clone's ignored files cannot be listed or synced, installs from the worktree's own lock files still run and only the orphan fallback is skipped, with one warning.
+- A failed install removes only what the package manager can create (the project's `node_modules` or `.venv`, nested `node_modules` of that project, and manager files such as `.pnp.cjs`, `.pnp.loader.mjs`, `.yarn/install-state.gz`, `.yarn/unplugged`, `.yarn/cache` that were absent before); other new files stay. The folder is left missing. A conflict between the lock files and `packageManager`, or a wrong manager version, gets no fallback either: the folders stay missing and the warning says why. An unexpected error in one project is reported for that project and the others still install.
+- A dependency folder that already stands in the worktree is never overwritten or reinstalled.
+- Shared git config changed by an install is reverted with a warning, except keys under `branch.*` and `remote.*` (another worktree may set upstreams at the same time).
 - A new branch starts from the local default branch, not the current HEAD. Uncommitted changes are not carried over.
 
 Arguments: `$ARGUMENTS`
@@ -65,13 +69,15 @@ login-form  ->  'login-form'
 
 Your reply starts with the script output exactly as printed: never capitalize, summarize, reword or translate it. Exit codes: 0 success, 1 refusal or error (one `error` log line), 2 usage error. On a non-zero exit, name the exit code and stop.
 
-When the output has install warnings (log lines whose text after the level starts with `cannot install dependencies`, `not installed:`, `not installed with`, `cannot remove the partial install`, `cannot clone`, `cannot link` or `to install:`), add after the verbatim output a short block in the user's language:
+When the output has install warnings (log lines whose text after the level starts with `cannot install dependencies`, `not installed:`, `not installed with`, `cannot remove the partial install`, `cannot clone`, `cannot link` or `to install:`, except the `already stands` lines described below), add after the verbatim output a short block in the user's language:
 
 - which project failed (the folder, or the worktree root) and why, in plain words;
 - what is missing (`... is left missing`, `stays missing`) or was linked instead;
 - the exact next step: the text of the `to install:` line, with its command, or the removal command the warning gives.
 
 An `info` line starting with `not installed automatically` is not a failure: that project was intentionally left out. Mention it in the same block (or alone) with the command shown in it (`run in the worktree: ...`).
+
+A `not installed with MANAGER: PATH already stands in the worktree and is left as it is` line (also `already stand ... are left as they are`, or `not installed: ... it already stands in the worktree`) is not an install failure either: the existing folder was kept and works as before. Say so, and add that only to reinstall it from this branch's lock file, remove it (`rm -rf -- PATH` for a real folder, `rm PATH` with no trailing slash for a link) and rerun the same command from the main clone. Never present this removal as the fix for an error.
 
 Whenever the output shows a dependency folder (`node_modules`, `.venv`, `venv` or a Python environment, at any depth) as linked, warnings or not (for example `installs skipped (--no-install): linked ...`, `linked ... meanwhile`, `linked it` or `linked it instead`), add that installs must not run in this worktree until the link itself is removed with `rm PATH` (no trailing slash; for example `rm node_modules`, `rm .venv`, `rm packages/a/node_modules`), because an install through the link writes into the main clone.
 

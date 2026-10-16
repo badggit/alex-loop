@@ -34,7 +34,7 @@ export interface FailureReport {
 
 const WRONG_VERSION_PATTERNS = [/\bERR_PNPM_LOCKFILE_BREAKING_CHANGE\b/u, /lockfile[^\n]*breaking change/iu] as const;
 
-// Corepack also prints these on info lines, so they rank below authentication, access-denied and sandbox.
+// Corepack also prints these on info lines, so they rank below every other class except other.
 const VERSION_MENTION_PATTERNS = [/\bpackageManager\b/u, /\bcorepack\b/iu] as const;
 
 const AUTH_CODE_PATTERNS = [
@@ -160,9 +160,6 @@ export function classifyFailure(input: FailureInput): FailureClass {
     if (matchesAny(output, SANDBOX_PATTERNS)) {
         return 'sandbox';
     }
-    if (matchesAny(output, VERSION_MENTION_PATTERNS)) {
-        return 'wrong-version';
-    }
     if (matchesAny(output, LOCK_OUT_OF_SYNC_PATTERNS)) {
         return 'lock-out-of-sync';
     }
@@ -171,6 +168,9 @@ export function classifyFailure(input: FailureInput): FailureClass {
     }
     if (matchesAny(output, NETWORK_PATTERNS)) {
         return 'network';
+    }
+    if (matchesAny(output, VERSION_MENTION_PATTERNS)) {
+        return 'wrong-version';
     }
     return 'other';
 }

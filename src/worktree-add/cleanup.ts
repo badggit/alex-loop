@@ -1,9 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { errorCode, lstatOrUndefined, parentInside } from './paths.ts';
-import { showText } from './text.ts';
-import type { CommandResult, Deps } from './types.ts';
+import { errorCode, JS_DEPS, lstatOrUndefined, parentInside, UV_VENV } from './paths.ts';
+import { failureLine, showText } from './text.ts';
+import type { Deps } from './types.ts';
 
 export type RemoveResult = { ok: true } | { ok: false; reason: string };
 
@@ -21,15 +21,7 @@ function withoutTrailingSeparators(file: string): string {
     return result;
 }
 
-function failureLine(result: CommandResult): string {
-    if (result.spawnError !== undefined) {
-        return result.spawnError;
-    }
-    const [first = ''] = result.stderr.trim().split('\n', 1);
-    return first.length > 0 ? first : `git exited with code ${String(result.code)}`;
-}
-
-// Empty folders are listed too, so one that stood before is kept and one the install left behind is removed.
+// Empty folders are listed too, so one that stood before is told apart from one the install left behind.
 async function listUntracked(deps: Deps, dir: string): Promise<ListResult> {
     const listed = await deps.runner.run({
         file: 'git',
@@ -91,7 +83,55 @@ export function removeSafely(root: string, rel: string): RemoveResult {
     }
 }
 
-// Removes every entry of DIR that is untracked now and was not in before; continues past failures.
+// Folder names a package manager installs into, at any depth of the project (workspaces nest node_modules).
+const TARGET_NAMES: ReadonlySet<string> = new Set([JS_DEPS, UV_VENV]);
+const YARN_FOLDER = '.yarn';
+const YARN_ARTIFACTS: readonly string[] = ['.yarn/install-state.gz', '.yarn/unplugged', '.yarn/cache'];
+// Paths relative to the project root that only a package manager writes during an install.
+const ROOT_ARTIFACTS: ReadonlySet<string> = new Set([
+    '.pnp.cjs',
+    '.pnp.loader.mjs',
+    '.pnp.data.json',
+    ...YARN_ARTIFACTS,
+]);
+
+function isManagerArtifact(rel: string): boolean {
+    const name = rel.split('/').at(-1) ?? '';
+    return TARGET_NAMES.has(name) || ROOT_ARTIFACTS.has(rel);
+}
+
+// A .yarn folder that is new as a whole is listed as one entry; only the yarn artifacts inside it go, and the
+// folder itself only when nothing else is left in it. A .yarn that is not a real folder is left alone.
+function removeNewYarnFolder(dir: string): RemoveResult {
+    const full = path.join(dir, YARN_FOLDER);
+    if (lstatOrUndefined(full)?.isDirectory() !== true) {
+        return { ok: true };
+    }
+    for (const rel of YARN_ARTIFACTS) {
+        const removed = removeSafely(dir, rel);
+        if (!removed.ok) {
+            return removed;
+        }
+    }
+    try {
+        if (fs.readdirSync(full).length === 0) {
+            fs.rmdirSync(full);
+        }
+        return { ok: true };
+    } catch (error) {
+        return { ok: false, reason: `cannot remove ${showText(YARN_FOLDER)}: ${showText(errorCode(error))}` };
+    }
+}
+
+function removeNewEntry(dir: string, rel: string): RemoveResult {
+    if (rel === YARN_FOLDER) {
+        return removeNewYarnFolder(dir);
+    }
+    return isManagerArtifact(rel) ? removeSafely(dir, rel) : { ok: true };
+}
+
+// Removes the package manager's own entries of DIR that are untracked now and were not in before; every other new
+// entry may be the user's (written while the install ran) and is left in place. Continues past failures.
 export async function removeNewEntries(deps: Deps, dir: string, before: ReadonlySet<string>): Promise<RemoveNewResult> {
     const now = await listUntracked(deps, dir);
     if (!now.ok) {
@@ -103,7 +143,7 @@ export async function removeNewEntries(deps: Deps, dir: string, before: Readonly
         if (before.has(rel)) {
             continue;
         }
-        const removed = removeSafely(dir, rel);
+        const removed = removeNewEntry(dir, rel);
         if (!removed.ok) {
             leftovers.push(rel);
             firstReason ??= removed.reason;

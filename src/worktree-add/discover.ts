@@ -298,3 +298,10 @@ export async function discoverProjects(deps: Deps, worktree: string): Promise<Pr
     );
     return kept.toSorted(compareProjects);
 }
+
+// Whether FOLDER, relative to the worktree, is a member of the workspace rooted at PROJECT; files are read each call.
+export function isWorkspaceMember(worktree: string, project: Project, folder: string): boolean {
+    const spec = workspaceOf(worktree, project);
+    const rel = relativeBelow(project.dir, folder);
+    return spec !== undefined && rel !== undefined && isMember(spec, rel);
+}

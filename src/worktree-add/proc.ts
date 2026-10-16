@@ -13,7 +13,7 @@ interface Supervised {
     result: Promise<CommandResult>;
 }
 
-const SPAWN_FAILED_CODE = 127;
+export const SPAWN_FAILED_CODE = 127;
 const KILLED_CODE = 137;
 const KILL_GRACE_MS = 5000;
 const GIVE_UP_MS = 10_000;
@@ -28,17 +28,23 @@ function errorCode(error: unknown): string | undefined {
     return;
 }
 
-// Later layers override earlier ones; an undefined value never removes a name set by an earlier layer.
-function childEnv(...layers: readonly (Env | undefined)[]): Record<string, string> {
-    const result: Record<string, string> = {};
-    for (const layer of layers) {
-        for (const [name, value] of Object.entries(layer ?? {})) {
-            if (value !== undefined) {
-                result[name] = value;
-            }
+// The request layer overrides the runner layer; an undefined value is skipped in the runner layer and removes the
+// name in the request layer, so a request can keep an inherited variable away from its child.
+function childEnv(runnerEnv: Env, requestEnv: Env | undefined): Record<string, string> {
+    const result = new Map<string, string>();
+    for (const [name, value] of Object.entries(runnerEnv)) {
+        if (value !== undefined) {
+            result.set(name, value);
         }
     }
-    return result;
+    for (const [name, value] of Object.entries(requestEnv ?? {})) {
+        if (value === undefined) {
+            result.delete(name);
+        } else {
+            result.set(name, value);
+        }
+    }
+    return Object.fromEntries(result);
 }
 
 function exitCodeOf(code: number | null, signal: NodeJS.Signals | null): number {
@@ -95,7 +101,8 @@ function ignoreResult(): void {
 
 // cancel sends SIGTERM to the whole process group, SIGKILL after KILL_GRACE_MS while any member remains, and
 // gives up on the streams at GIVE_UP_MS, so a cancelled run always settles whatever a grandchild does with the
-// pipes. A timeoutMs runs the same cancel path and marks the result timedOut; without either there is no time limit.
+// pipes. A timeoutMs runs the same cancel path and marks the result timedOut unless the child itself had already
+// exited; without either there is no time limit.
 function superviseChild(child: SpawnedChild, timeoutMs: number | undefined): Supervised {
     let resolveResult: (_result: CommandResult) => void = ignoreResult;
     const result = new Promise<CommandResult>((resolve) => {
@@ -160,10 +167,15 @@ function superviseChild(child: SpawnedChild, timeoutMs: number | undefined): Sup
         timers.push(
             setTimeout(
                 () => {
-                    if (!cancelled && !settled) {
-                        timedOut = true;
-                        cancel();
+                    if (cancelled || settled) {
+                        return;
                     }
+                    // A child that already exited is not timed out; the cancel still runs, since whatever it left
+                    // in its group may hold the pipes open and keep 'close' from ever coming.
+                    if (exitCode === undefined) {
+                        timedOut = true;
+                    }
+                    cancel();
                 },
                 Math.min(timeoutMs, MAX_TIMER_MS)
             )

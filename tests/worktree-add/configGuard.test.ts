@@ -108,16 +108,37 @@ await test('an added key is removed and a removed key is restored', async (t) =>
 
 await test('a multi-valued key gets both values back', async (t) => {
     const fixture = makeFixture(t);
-    const first = '+refs/heads/*:refs/remotes/origin/*';
-    const second = '+refs/tags/*:refs/tags/*';
-    gitSync(fixture.env, ['-C', fixture.main, 'config', '--add', 'remote.origin.fetch', second]);
+    const first = 'https://mirror-one.example.test/';
+    const second = 'https://mirror-two.example.test/';
+    const key = 'url.https://registry.example.test/.insteadof';
+    gitSync(fixture.env, ['-C', fixture.main, 'config', '--add', key, first]);
+    gitSync(fixture.env, ['-C', fixture.main, 'config', '--add', key, second]);
     const snapshot = await snapshotOf(fixture);
-    gitSync(fixture.env, ['config', '--unset-all', 'remote.origin.fetch'], fixture.worktree);
-    gitSync(fixture.env, ['config', 'remote.origin.fetch', 'other'], fixture.worktree);
+    gitSync(fixture.env, ['config', '--unset-all', key], fixture.worktree);
+    gitSync(fixture.env, ['config', key, 'other'], fixture.worktree);
     const reverted = await revertConfigChanges(fixture.deps, fixture.env, snapshot);
-    assert.deepEqual(reverted, ['remote.origin.fetch']);
-    assert.deepEqual(sharedValues(fixture, 'remote.origin.fetch'), [first, second]);
+    assert.deepEqual(reverted, [key]);
+    assert.deepEqual(sharedValues(fixture, key), [first, second]);
     assert.ok(warnings(fixture)[0]?.includes(`from ${first}, ${second} to other;`), warnings(fixture)[0]);
+});
+
+await test('branch and remote keys set during the install stay while other changes are reverted', async (t) => {
+    const fixture = makeFixture(t);
+    const snapshot = await snapshotOf(fixture);
+    const fetch = sharedValues(fixture, 'remote.origin.fetch');
+    gitSync(fixture.env, ['config', 'branch.x.merge', 'refs/heads/x'], fixture.worktree);
+    gitSync(fixture.env, ['config', 'Branch.Other.remote', 'origin'], fixture.worktree);
+    gitSync(fixture.env, ['config', '--add', 'REMOTE.origin.fetch', '+refs/tags/*:refs/tags/*'], fixture.worktree);
+    gitSync(fixture.env, ['config', 'core.hooksPath', '.husky/_'], fixture.worktree);
+    const reverted = await revertConfigChanges(fixture.deps, fixture.env, snapshot);
+    assert.deepEqual(reverted, ['core.hookspath']);
+    assert.deepEqual(sharedValues(fixture, 'core.hooksPath'), []);
+    assert.deepEqual(sharedValues(fixture, 'branch.x.merge'), ['refs/heads/x']);
+    assert.deepEqual(sharedValues(fixture, 'branch.Other.remote'), ['origin']);
+    assert.deepEqual(sharedValues(fixture, 'remote.origin.fetch'), [...fetch, '+refs/tags/*:refs/tags/*']);
+    const warned = warnings(fixture);
+    assert.equal(warned.length, 1);
+    assert.match(warned[0] ?? '', /reverted core\.hookspath /u);
 });
 
 await test('no change gives no warning and an empty list', async (t) => {
