@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { addExcludePatterns, anchoredPattern, TEMP_PATTERN } from './exclude.ts';
-import { isLinkWithText, lstatOrUndefined } from './paths.ts';
+import { isLinkWithText, lstatOrUndefined, parentInside } from './paths.ts';
 import { hasControlCharacter, showText } from './text.ts';
 import type { Deps, EntryTransfer } from './types.ts';
 
@@ -55,14 +55,6 @@ function errorCode(error: unknown): string {
     return 'unknown';
 }
 
-function realOrUndefined(file: string): string | undefined {
-    try {
-        return fs.realpathSync.native(file);
-    } catch {
-        return;
-    }
-}
-
 // The topmost ignored entries of MAIN, relative and without a trailing slash; undefined when git fails.
 async function listIgnored(deps: Deps, main: string): Promise<string[] | undefined> {
     const listed = await deps.runner.run({
@@ -91,13 +83,6 @@ function usableEntries(deps: Deps, rels: readonly string[]): string[] {
         }
     }
     return kept;
-}
-
-// A parent reached through a link into the main clone would put the new entry into the main clone itself.
-function parentInside(worktree: string, rel: string): boolean {
-    const realWorktree = realOrUndefined(worktree);
-    const parent = realOrUndefined(path.dirname(path.join(worktree, rel)));
-    return realWorktree !== undefined && parent === path.join(realWorktree, path.dirname(rel));
 }
 
 function isOwnLink(run: SyncRun, rel: string): boolean {

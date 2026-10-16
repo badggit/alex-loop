@@ -298,6 +298,18 @@ function isLinkWithText(file, text) {
     return false;
   }
 }
+function realOrUndefined(file) {
+  try {
+    return fs2.realpathSync.native(file);
+  } catch {
+    return;
+  }
+}
+function parentInside(root, rel) {
+  const realRoot = realOrUndefined(root);
+  const parent = realOrUndefined(path.dirname(path.join(root, rel)));
+  return realRoot !== void 0 && parent === path.join(realRoot, path.dirname(rel));
+}
 var init_paths = __esm({
   "src/worktree-add/paths.ts"() {
     "use strict";
@@ -1477,13 +1489,6 @@ function errorCode5(error) {
   }
   return "unknown";
 }
-function realOrUndefined(file) {
-  try {
-    return fs9.realpathSync.native(file);
-  } catch {
-    return;
-  }
-}
 async function listIgnored(deps, main2) {
   const listed = await deps.runner.run({
     file: "git",
@@ -1506,11 +1511,6 @@ function usableEntries(deps, rels) {
     }
   }
   return kept;
-}
-function parentInside(worktree, rel) {
-  const realWorktree = realOrUndefined(worktree);
-  const parent = realOrUndefined(path10.dirname(path10.join(worktree, rel)));
-  return realWorktree !== void 0 && parent === path10.join(realWorktree, path10.dirname(rel));
 }
 function isOwnLink(run, rel) {
   return isLinkWithText(path10.join(run.worktree, rel), path10.join(run.main, rel));

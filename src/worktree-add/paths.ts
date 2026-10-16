@@ -65,3 +65,18 @@ export function isLinkWithText(file: string, text: string): boolean {
         return false;
     }
 }
+
+export function realOrUndefined(file: string): string | undefined {
+    try {
+        return fs.realpathSync.native(file);
+    } catch {
+        return;
+    }
+}
+
+// A parent reached through a link (for example into the main clone) would put the entry outside root itself.
+export function parentInside(root: string, rel: string): boolean {
+    const realRoot = realOrUndefined(root);
+    const parent = realOrUndefined(path.dirname(path.join(root, rel)));
+    return realRoot !== undefined && parent === path.join(realRoot, path.dirname(rel));
+}
