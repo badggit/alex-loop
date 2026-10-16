@@ -93,6 +93,7 @@ export interface MainOptions {
 }
 
 export async function main(options: MainOptions = {}): Promise<void> {
+    const startedMs = Date.now();
     const run = options.run ?? runWorktreeAdd;
     const env = process.env;
     const runner = stoppable(createProcessRunner(env));
@@ -105,7 +106,7 @@ export async function main(options: MainOptions = {}): Promise<void> {
     };
     const uninstall = installSignalCleanup(deps, runner);
     try {
-        const outcome = await run({ deps, env, cwd: process.cwd() }, process.argv.slice(2));
+        const outcome = await run({ deps, env, cwd: process.cwd(), startedMs }, process.argv.slice(2));
         // A signal cleanup in progress owns the exit: it re-raises the signal once the children are gone.
         if (runner.stopped()) {
             return;

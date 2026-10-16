@@ -5,7 +5,7 @@ import { test, type TestContext } from 'node:test';
 
 import { anchoredPattern, EXCLUDE_HEADER, TEMP_PATTERN } from '../../src/worktree-add/exclude.ts';
 import { classify, syncIgnored } from '../../src/worktree-add/sync.ts';
-import type { CloneOutcome, Deps, EntryTransfer } from '../../src/worktree-add/types.ts';
+import type { Deps, EntryTransfer, Env } from '../../src/worktree-add/types.ts';
 
 import { testDeps } from './support/deps.ts';
 import { commitFile, gitSync, makeRepo, testEnv } from './support/git.ts';
@@ -43,9 +43,11 @@ const IGNORED_FILES = [
     'x.tsbuildinfo',
 ];
 const COPY_RELS = ['.env', 'CLAUDE.local.md', 'apps/web/.env.local', 'temp.local'];
-const LINK_RELS = ['.claude', '.venv', 'config', 'docs.local'];
+const LINK_RELS = ['.claude', 'config', 'docs.local'];
+const DEP_RELS = ['.venv', 'node_modules'];
 
 interface Fixture {
+    env: Env;
     main: string;
     worktree: string;
     deps: Deps & { lines: string[] };
@@ -59,7 +61,6 @@ interface FakeTransfer extends EntryTransfer {
 }
 
 interface FakeOptions {
-    clone?: (_rel: string) => CloneOutcome;
     onCopy?: (_rel: string) => void;
 }
 
@@ -80,7 +81,7 @@ function makeFixture(t: TestContext): Fixture {
     const worktree = path.join(root, 'app-task');
     gitSync(env, ['-C', main, 'worktree', 'add', '--quiet', '-b', 'task', worktree]);
     const exclude = path.join(main, '.git', 'info', 'exclude');
-    return { main, worktree, deps: testDeps(env), exclude, baseline: fs.readFileSync(exclude, 'utf8') };
+    return { env, main, worktree, deps: testDeps(env), exclude, baseline: fs.readFileSync(exclude, 'utf8') };
 }
 
 function fakeTransfer(options: FakeOptions = {}): FakeTransfer {
@@ -96,7 +97,7 @@ function fakeTransfer(options: FakeOptions = {}): FakeTransfer {
         },
         cloneDependency: (rel) => {
             clones.push(rel);
-            return Promise.resolve(options.clone?.(rel) ?? { kind: 'cloned' });
+            return Promise.resolve({ kind: 'cloned' });
         },
     };
 }
@@ -143,8 +144,9 @@ await test('classify follows the class table by the last path component', () => 
         ['tsconfig.tsbuildinfo', 'skip'],
         ['docs.local', 'link'],
         ['.claude', 'link'],
-        ['.venv', 'link'],
-        ['venv', 'link'],
+        ['.venv', 'dep'],
+        ['venv', 'dep'],
+        ['services/api/.venv', 'dep'],
         ['AGENTS.local.md', 'link'],
         ['config', 'link'],
         ['.envrc', 'link'],
@@ -154,63 +156,53 @@ await test('classify follows the class table by the last path component', () => 
     }
 });
 
-await test('copies, clones, links and skips each ignored entry by its class', async (t) => {
+await test('copies, links and skips each ignored entry by its class and returns the dependency folders', async (t) => {
     const fixture = makeFixture(t);
     const { main, worktree, deps } = fixture;
     const transfer = fakeTransfer();
-    await syncIgnored(deps, main, worktree, transfer);
+    const depRels = await syncIgnored(deps, main, worktree, transfer);
+    assert.ok(depRels, 'the ignored files of the main clone could not be listed');
+    assert.deepEqual(depRels.toSorted(), DEP_RELS);
     assert.deepEqual(transfer.copies.toSorted(), COPY_RELS.toSorted());
-    assert.deepEqual(transfer.clones, ['node_modules']);
+    assert.deepEqual(transfer.clones, []);
     for (const rel of LINK_RELS) {
         assert.equal(linkText(path.join(worktree, rel)), path.join(main, rel), rel);
     }
-    for (const rel of [...COPY_RELS, 'node_modules', 'dist', 'x.tsbuildinfo']) {
-        assert.equal(fs.existsSync(path.join(worktree, rel)), false, rel);
+    for (const rel of [...COPY_RELS, ...DEP_RELS, 'dist', 'x.tsbuildinfo']) {
+        assert.equal(fs.lstatSync(path.join(worktree, rel), { throwIfNoEntry: false }), undefined, rel);
     }
-    assert.equal(appended(fixture), `${EXCLUDE_HEADER}\n${TEMP_PATTERN}\n/.claude\n/.venv\n/config\n/docs.local\n`);
-    assert.deepEqual(messages(deps.lines), ['info linked .claude, .venv, config, docs.local']);
+    assert.equal(appended(fixture), `${EXCLUDE_HEADER}\n${TEMP_PATTERN}\n/.claude\n/config\n/docs.local\n`);
+    assert.deepEqual(messages(deps.lines), ['info linked .claude, config, docs.local']);
 });
 
-await test('an unavailable clone gate links the dependency and says so', async (t) => {
+await test('an ignored folder of any name holding pyvenv.cfg is returned as a dependency folder', async (t) => {
     const fixture = makeFixture(t);
-    const { main, worktree, deps } = fixture;
-    const transfer = fakeTransfer({ clone: () => ({ kind: 'unavailable', reason: 'different filesystems' }) });
-    await syncIgnored(deps, main, worktree, transfer);
-    assert.equal(linkText(path.join(worktree, 'node_modules')), path.join(main, 'node_modules'));
-    assert.deepEqual(messages(deps.lines), [
-        'info linked .claude, .venv, config, docs.local',
-        'info linked node_modules: no copy-on-write between the clone and the worktree',
-    ]);
-    assert.equal(excludeLines(fixture).includes('/node_modules'), true);
+    const { env, main, worktree, deps } = fixture;
+    commitFile(env, main, '.gitignore', `${IGNORE_RULES}tools-env/\nplain-tools/\n`);
+    writeFile(path.join(main, 'tools-env', 'pyvenv.cfg'), 'home = /usr/bin\n');
+    writeFile(path.join(main, 'tools-env', 'bin', 'python'), 'python\n');
+    writeFile(path.join(main, 'plain-tools', 'run.sh'), 'run\n');
+    const depRels = await syncIgnored(deps, main, worktree, fakeTransfer());
+    assert.ok(depRels, 'the ignored files of the main clone could not be listed');
+    assert.deepEqual(depRels.toSorted(), [...DEP_RELS, 'tools-env'].toSorted());
+    assert.equal(fs.lstatSync(path.join(worktree, 'tools-env'), { throwIfNoEntry: false }), undefined);
+    assert.equal(linkText(path.join(worktree, 'plain-tools')), path.join(main, 'plain-tools'));
+    const lines = excludeLines(fixture);
+    assert.equal(lines.includes('/tools-env'), false);
+    assert.equal(lines.includes('/plain-tools'), true);
 });
 
-await test('a failed clone links the dependency and warns', async (t) => {
-    const fixture = makeFixture(t);
-    const { main, worktree, deps } = fixture;
-    const transfer = fakeTransfer({ clone: () => ({ kind: 'failed', reason: 'disk full' }) });
-    await syncIgnored(deps, main, worktree, transfer);
-    assert.equal(linkText(path.join(worktree, 'node_modules')), path.join(main, 'node_modules'));
-    assert.deepEqual(messages(deps.lines), [
-        'warn cannot clone node_modules into the worktree (disk full); linked it instead',
-        'info linked .claude, .venv, config, docs.local',
-    ]);
-    assert.equal(excludeLines(fixture).includes('/node_modules'), true);
-});
-
-await test('a cloned dependency folder gets its pattern and a second run changes nothing', async (t) => {
+await test('dependency folders get no pattern from the sync and a second run changes nothing', async (t) => {
     const fixture = makeFixture(t);
     const { main, worktree, deps } = fixture;
     const options: FakeOptions = {
-        clone: (rel) => {
-            fs.mkdirSync(path.join(worktree, rel));
-            return { kind: 'cloned' };
-        },
         onCopy: (rel) => {
             fs.cpSync(path.join(main, rel), path.join(worktree, rel), { recursive: true });
         },
     };
     await syncIgnored(deps, main, worktree, fakeTransfer(options));
-    assert.equal(excludeLines(fixture).includes('/node_modules'), true);
+    assert.equal(excludeLines(fixture).includes('/node_modules'), false);
+    assert.equal(excludeLines(fixture).includes('/.venv'), false);
     const excludeAfterFirst = fs.readFileSync(fixture.exclude, 'utf8');
     deps.lines.length = 0;
     const second = fakeTransfer(options);
@@ -335,7 +327,7 @@ await test('a failing listing warns and creates nothing', async (t) => {
     };
     const before = fs.readdirSync(worktree).toSorted();
     const transfer = fakeTransfer();
-    await syncIgnored(failing, main, worktree, transfer);
+    assert.equal(await syncIgnored(failing, main, worktree, transfer), undefined);
     assert.deepEqual(messages(deps.lines), [
         `warn cannot list the ignored files of ${main}; nothing synced into the worktree`,
     ]);

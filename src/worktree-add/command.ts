@@ -6,13 +6,24 @@ import { createCloneGate } from './cowGate.ts';
 import { applyStep } from './create.ts';
 import { decideWorktree } from './decide.ts';
 import { gatherFacts } from './facts.ts';
+import { DEFAULT_TIMING, runInstallStage, type InstallStageRequest, type InstallTiming } from './installStage.ts';
 import { checkBranchName, locateRepository } from './repo.ts';
 import { logExistingBranch, logSameTicket, startPoint } from './start.ts';
 import { syncIgnored } from './sync.ts';
 import { deriveTarget } from './target.ts';
 import { showText } from './text.ts';
 import { createTransfer } from './transfer.ts';
-import type { ApplyStep, CloneGate, Decision, Deps, Env, Outcome, RepoLayout, WorktreeTarget } from './types.ts';
+import type {
+    ApplyStep,
+    CloneGate,
+    Decision,
+    Deps,
+    EntryTransfer,
+    Env,
+    Outcome,
+    RepoLayout,
+    WorktreeTarget,
+} from './types.ts';
 import { checkGitVersion } from './versions.ts';
 
 export interface CommandIo {
@@ -20,6 +31,10 @@ export interface CommandIo {
     env: Env;
     cwd: string;
     gate?: CloneGate;
+    // When the run started, so the install phase counts the time spent before it.
+    startedMs?: number;
+    nowMs?: () => number;
+    timing?: Partial<InstallTiming>;
 }
 
 type StepResult = { ok: true; step: ApplyStep } | { ok: false; outcome: Outcome };
@@ -66,20 +81,77 @@ async function stepFor(deps: Deps, repo: RepoLayout, target: WorktreeTarget, dec
     }
 }
 
-// The worktree already exists here, so a sync that throws is only a warning.
-async function syncQuietly(io: CommandIo, repo: RepoLayout, target: WorktreeTarget): Promise<void> {
-    const { deps } = io;
+// Never throws: a thrown value whose conversion to text throws is shown as an unknown error.
+function messageOf(error: unknown): string {
     try {
-        const transfer = createTransfer(deps, {
-            main: repo.main,
-            worktree: target.path,
-            gate: io.gate ?? createCloneGate(),
-        });
-        await syncIgnored(deps, repo.main, target.path, transfer);
-    } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        deps.log.warn(`cannot sync ignored paths into the worktree: ${showText(message)}`);
+        return showText(error instanceof Error ? error.message : String(error));
+    } catch {
+        return 'unknown error';
     }
+}
+
+// The worktree already exists here, so a sync that throws is only a warning; undefined means the dependency
+// folders of the main clone are unknown.
+async function syncQuietly(
+    deps: Deps,
+    repo: RepoLayout,
+    target: WorktreeTarget,
+    transfer: EntryTransfer
+): Promise<string[] | undefined> {
+    try {
+        return await syncIgnored(deps, repo.main, target.path, transfer);
+    } catch (error) {
+        deps.log.warn(`cannot sync ignored paths into the worktree: ${messageOf(error)}`);
+        return undefined;
+    }
+}
+
+// Only defined values override the defaults, so an explicit undefined keeps the default.
+function mergedTiming(timing: Partial<InstallTiming> | undefined): InstallTiming {
+    return {
+        phaseMs: timing?.phaseMs ?? DEFAULT_TIMING.phaseMs,
+        progressMs: timing?.progressMs ?? DEFAULT_TIMING.progressMs,
+        networkTimeoutMs: timing?.networkTimeoutMs ?? DEFAULT_TIMING.networkTimeoutMs,
+    };
+}
+
+// Install results never change the outcome, so a stage that throws is only a warning.
+async function installQuietly(request: InstallStageRequest): Promise<void> {
+    try {
+        await runInstallStage(request);
+    } catch (error) {
+        request.deps.log.warn(`cannot install dependencies: ${messageOf(error)}`);
+    }
+}
+
+async function syncAndInstall(
+    io: CommandIo,
+    context: { repo: RepoLayout; target: WorktreeTarget; noInstall: boolean; startedMs: number }
+): Promise<void> {
+    const { deps } = io;
+    const { repo, target } = context;
+    const transfer = createTransfer(deps, {
+        main: repo.main,
+        worktree: target.path,
+        gate: io.gate ?? createCloneGate(),
+    });
+    const depRels = await syncQuietly(deps, repo, target, transfer);
+    if (depRels === undefined) {
+        deps.log.warn('cannot install dependencies: the ignored files of the main clone could not be listed');
+        return;
+    }
+    await installQuietly({
+        deps,
+        env: io.env,
+        main: repo.main,
+        worktree: target.path,
+        depRels,
+        noInstall: context.noInstall,
+        transfer,
+        startedMs: context.startedMs,
+        nowMs: io.nowMs ?? Date.now,
+        timing: mergedTiming(io.timing),
+    });
 }
 
 // Derives the target and checks its branch name; a wrong name is the caller's mistake (usage), a broken git is not.
@@ -107,6 +179,7 @@ async function prepareTarget(
 }
 
 export async function runWorktreeAdd(io: CommandIo, argv: readonly string[]): Promise<Outcome> {
+    const startedMs = io.startedMs ?? Date.now();
     const { deps } = io;
     const parsed = parseArgs(argv, io.env.HOME ?? os.homedir());
     if (parsed.kind !== 'ok') {
@@ -141,6 +214,6 @@ export async function runWorktreeAdd(io: CommandIo, argv: readonly string[]): Pr
     if (!applied.ok) {
         return refused(applied.reason);
     }
-    await syncQuietly(io, repo, target);
+    await syncAndInstall(io, { repo, target, noInstall: !parsed.install, startedMs });
     return { kind: 'ok', path: target.path };
 }
