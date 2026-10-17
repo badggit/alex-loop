@@ -5,7 +5,7 @@ argument-hint: "<description | issue-key | issue-url>"
 allowed-tools: "Bash(git:*), Read, Grep, Glob"
 ---
 
-<!-- Updated: 2026-07-10 15:24:36 UTC -->
+<!-- Updated: 2026-10-17 -->
 
 ## Core principle
 
@@ -132,7 +132,7 @@ If the input carries a tracker issue key (`ABC-123` shape), preserve it verbatim
 ### Step 4 - Ensure clean state
 
 Before creating:
-- `git status` - refuse to create on a dirty tree unless the user opts to stash (`git stash push -u -m "pre-branch"`) or commit first. **Exception:** untracked files under `docs.local/alex-loop/` and `docs/alex-loop/` do not count as dirty — they are intentionally uncommitted loop artifacts and `git checkout -b` carries them onto the new branch. **Exception:** when creating the branch in a new worktree (Step 5), the current tree is not touched, so this gate does not apply.
+- `git status` - refuse to create on a dirty tree unless the user opts to stash (`git stash push -u -m "pre-branch"`) or commit first. **Exception:** untracked files under `docs.local/alex-loop/` and `docs/alex-loop/` do not count as dirty — they are intentionally uncommitted loop artifacts and `git checkout -b` carries them onto the new branch.
 - **Determine the base branch by detection, not assumption:** `git symbolic-ref --short refs/remotes/origin/HEAD` (run `git remote set-head origin --auto` first if unset), then upstream config and contributor docs; fall back to the `main` / `master` / `develop` guess list only when detection yields nothing. Check the current branch with `git branch --show-current` and check out the base first if needed.
 - **Fork workflow:** if a remote named `upstream` exists (`git remote`), the base is `upstream/<base>` (fetch from upstream) while the push target stays `origin`. If `origin/<base>` and `upstream/<base>` have diverged, say so explicitly before proceeding.
 - `git fetch --prune <base-remote>` then fast-forward the base: `git pull --ff-only <base-remote> <base>`. If non-FF, surface and stop - do not force-update. If the fetch fails (offline, no remote), continue from the local base and state that the base may be stale (see Error handling).
@@ -144,13 +144,7 @@ Before creating:
 git checkout -b <branch-name>
 ```
 
-**Worktree option.** When live work is in progress on another branch (or the caller needs an isolated tree — e.g. parallel implementation runs), offer creating the branch in a new worktree instead of switching:
-
-```bash
-git worktree add ../<repo-name>-<branch-slug> -b <branch-name> <base>
-```
-
-The current tree stays untouched (no stash juggling, no dirty-tree gate). Offer, don't impose: a worktree costs disk space and the user must know where it lives. Report the worktree path when created.
+Never create a git worktree here, not even in autonomous mode: a separate worktree is made only when the user runs `/alex-loop:worktree-add` themselves.
 
 If Step 4 stashed, restore it now: `git stash pop`. On conflict, stop and surface — never drop the stash.
 

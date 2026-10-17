@@ -96,7 +96,7 @@ Directives: `alex-loop: autonomous` — this skill hosts the contract the other 
 
 - Detects the project's naming convention (recent branches, contributor docs, enforced hooks — the hook wins) before proposing anything; never imposes a scheme.
 - Base branch detected via `origin/HEAD` (not a hardcoded guess); fork workflow (upstream base, origin push); `git check-ref-format` as the final validity check.
-- Worktree option for parallel work — the current tree stays untouched, no stash juggling.
+- Never creates git worktrees; a separate worktree is made only when the user runs `/alex-loop:worktree-add`.
 
 Directives: `alex-loop: autonomous` — skips the name confirmation, adopts the house default without asking, proceeds on a dirty tree; hard blockers (hook-rejected name, detached HEAD, existing branch) stay hard.
 

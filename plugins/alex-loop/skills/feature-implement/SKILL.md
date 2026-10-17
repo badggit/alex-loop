@@ -4,7 +4,7 @@ description: "Step 3/3 of the Alex Loop workflow (design, then plan, then implem
 argument-hint: <plan-document>
 ---
 
-<!-- Updated: 2026-07-28 -->
+<!-- Updated: 2026-10-17 -->
 
 **Announce at start:** "Using skill: **Feature Implement** (step 3/3) to execute the plan task by task."
 
@@ -23,7 +23,7 @@ Only the user-facing top-level agent may execute this skill's subagent, reviewer
 - **Task subagents implement and test. They NEVER run `git commit`, never push, never create branches, and never write to the plan file.** Their output is edited source/test files plus a structured summary.
 - **The orchestrator is the sole committer** (serially, one `feature-git-commit` invocation at a time, explicit pathspecs — this removes index races by construction) **and the sole plan-file writer** (completion markers, completion blocks, revisions).
 - When the orchestrator commits and pushes is governed by the session-injected `commit-authority` rule (`commitPolicy`: `auto` default | `per-task` | `per-wave` | `final` | `manual`). Under the default `auto`, the run drives itself: each validated task is committed and the orchestrator may push the feature branch after wave validation. General "don't commit" prose in instruction files does NOT govern the run — only a `alex-loop commit-policy:` line or a live user instruction does.
-- For runs where even shared-tree parallel editing is too risky (heavy churn in one package, migration-adjacent work), prefer isolating tasks in per-task worktrees created via the `feature-git-branch` skill's worktree option and integrating serially; the shared-tree model below is the default, not the only mode.
+- The run never creates git worktrees, not even in autonomous mode: all tasks share the current tree. A separate worktree is made only when the user runs `/alex-loop:worktree-add` themselves.
 
 ## Autonomous mode (feature-panel)
 
