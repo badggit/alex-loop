@@ -1,13 +1,14 @@
 import { hasControlCharacter, showText } from './text.ts';
 
 export type ParsedArgs =
-    | { kind: 'ok'; suffix: string; parent: string | undefined; install: boolean }
+    | { kind: 'ok'; suffix: string | undefined; parent: string | undefined; install: boolean; links: readonly string[] }
     | { kind: 'help' }
     | { kind: 'usage'; message: string };
 
 type ValueOption = '--suffix' | '--parent';
 
 const NO_INSTALL = '--no-install';
+const LINK = '--link';
 
 const MAX_SUFFIX = 100;
 const SUFFIX_PATTERN = /^[a-z0-9][a-z0-9._-]*$/u;
@@ -29,6 +30,27 @@ function suffixProblem(suffix: string): string | undefined {
         return `the suffix must not contain ".." or end in "." or ".lock": ${shown}`;
     }
     return;
+}
+
+const BAD_LINK_COMPONENTS: ReadonlySet<string> = new Set(['', '.', '..']);
+
+// Trailing slashes are dropped so "data/" and "data" name the same entry.
+function parseLink(value: string): { ok: true; link: string } | { ok: false; message: string } {
+    if (value.length === 0) {
+        return { ok: false, message: `the ${LINK} value must not be empty` };
+    }
+    if (hasControlCharacter(value)) {
+        return { ok: false, message: `the ${LINK} value contains a control character: ${showText(value)}` };
+    }
+    const link = value.replace(/\/+$/u, '');
+    // "./a", "a//b" and "a/./b" are refused too: the rules and the dedupe compare paths as plain text.
+    if (link.split('/').some((component) => BAD_LINK_COMPONENTS.has(component))) {
+        return {
+            ok: false,
+            message: `${LINK} takes a path relative to the repository root, without "..": ${showText(value)}`,
+        };
+    }
+    return { ok: true, link };
 }
 
 // A leading ~ or ~/ becomes home; every other ~ form (~user) is refused instead of guessed.
@@ -62,6 +84,7 @@ export function parseArgs(argv: readonly string[], home: string): ParsedArgs {
     }
     const values: Partial<Record<ValueOption, string>> = {};
     let install = true;
+    const links: string[] = [];
     for (let index = 0; index < argv.length; index += 1) {
         const arg = argv[index] ?? '';
         if (arg === NO_INSTALL) {
@@ -69,6 +92,24 @@ export function parseArgs(argv: readonly string[], home: string): ParsedArgs {
                 return usage(`${NO_INSTALL} can be given only once`);
             }
             install = false;
+            continue;
+        }
+        if (arg === LINK) {
+            const value = argv[index + 1];
+            if (value === undefined) {
+                return usage(`missing value for ${LINK}`);
+            }
+            if (value.startsWith('--')) {
+                return usage(`missing value for ${LINK}: got the option ${showText(value)}`);
+            }
+            const parsed = parseLink(value);
+            if (!parsed.ok) {
+                return usage(parsed.message);
+            }
+            if (!links.includes(parsed.link)) {
+                links.push(parsed.link);
+            }
+            index += 1;
             continue;
         }
         if (!isValueOption(arg)) {
@@ -90,24 +131,25 @@ export function parseArgs(argv: readonly string[], home: string): ParsedArgs {
         index += 1;
     }
     const suffix = values['--suffix'];
-    if (suffix === undefined) {
+    // With --link the suffix is optional: inside a linked worktree only the named paths are linked.
+    if (suffix === undefined && links.length === 0) {
         return usage('--suffix SUFFIX is required');
     }
-    const problem = suffixProblem(suffix);
+    const problem = suffix === undefined ? undefined : suffixProblem(suffix);
     if (problem !== undefined) {
         return usage(problem);
     }
     const parentValue = values['--parent'];
     if (parentValue === undefined) {
-        return { kind: 'ok', suffix, parent: undefined, install };
+        return { kind: 'ok', suffix, parent: undefined, install, links };
     }
     const expanded = expandParent(parentValue, home);
-    return expanded.ok ? { kind: 'ok', suffix, parent: expanded.parent, install } : usage(expanded.message);
+    return expanded.ok ? { kind: 'ok', suffix, parent: expanded.parent, install, links } : usage(expanded.message);
 }
 
 export function usageText(): string {
     return [
-        'Usage: worktree-add.mjs --suffix SUFFIX [--parent DIR] [--no-install]',
+        'Usage: worktree-add.mjs --suffix SUFFIX [--parent DIR] [--no-install] [--link PATH]...',
         '',
         'Creates or reuses the sibling git worktree MAIN-SUFFIX on the branch SUFFIX and prints its absolute path.',
         '',
@@ -115,6 +157,8 @@ export function usageText(): string {
         "  --parent DIR     folder for the worktree (default: the main clone's parent folder);",
         '                   a leading ~ or ~/ is expanded to the home folder, other ~ forms are refused',
         '  --no-install     skip the dependency installs; dependency folders are cloned or linked instead',
+        '  --link PATH      link PATH (relative to the repository root, repeatable) from the main clone into the worktree;',
+        '                   inside a linked worktree it links only these paths and needs no --suffix',
         '  --help           show this help',
         '',
         'Exit codes: 0 success (the path on stdout), 1 refusal or error, 2 wrong arguments.',

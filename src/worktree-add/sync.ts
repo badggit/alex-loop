@@ -2,15 +2,50 @@ import path from 'node:path';
 
 import { addExcludePatterns, anchoredPattern, TEMP_PATTERN } from './exclude.ts';
 import { makeLink } from './fallback.ts';
-import { isOwnLink, JS_DEPS, lstatOrUndefined, missingOrOwnLink, parentInside } from './paths.ts';
+import { logLinked, placeForcedLinks } from './forcedLinks.ts';
+import { checkLegacyExcludes } from './legacy.ts';
+import { notLinkedLine } from './notLinked.ts';
+import { blockedReason, ensureParents } from './parents.ts';
+import { isAtOrAbove, isOwnLink, lstatOrUndefined, missingOrOwnLink } from './paths.ts';
+import { classifyEntry, entryFacts, type EntryClass } from './rules.ts';
 import { hasControlCharacter, showText } from './text.ts';
-import type { Deps, EntryTransfer } from './types.ts';
+import type { Deps, EntryTransfer, Env } from './types.ts';
+import { boundedSize, DEFAULT_WALK_LIMITS, type Unlinked, walkCollapsed } from './walk.ts';
 
-export type EntryClass = 'copy' | 'dep' | 'skip' | 'link';
+export interface SyncOptions {
+    links: readonly string[];
+    env: Env;
+}
 
-interface ClassifiedEntry {
+type ActionKind = 'copy' | 'dep' | 'link';
+
+interface Action {
     rel: string;
-    kind: EntryClass;
+    kind: ActionKind;
+    // Found by a walk below a collapsed folder, so its parent folders may be missing in the worktree.
+    found: boolean;
+}
+
+// A walked folder over the walk limits; placed is set once an entry git lists below it gets an action.
+interface CappedFolder {
+    rel: string;
+    placed: boolean;
+}
+
+interface SyncPlan {
+    actions: Action[];
+    report: Unlinked[];
+    // Entries whose subtree is fully handled: anything listed below them is not processed again.
+    hiding: Set<string>;
+    planned: Set<string>;
+    capped: CappedFolder[];
+    // The --link paths that stand as own links: everything at or below them is already handled.
+    forced: readonly string[];
+}
+
+interface PlanPaths {
+    main: string;
+    worktree: string;
 }
 
 interface SyncRun {
@@ -19,54 +54,12 @@ interface SyncRun {
     worktree: string;
     transfer: EntryTransfer;
     linked: string[];
+    depRels: string[];
 }
 
-const COPY_NAMES: ReadonlySet<string> = new Set(['.env', 'CLAUDE.local.md', 'temp.local']);
-const COPY_PREFIX = '.env.';
-// Python environments (venv, .venv or any other name) are told by their pyvenv.cfg, never by name alone.
-const DEPENDENCY_NAMES: ReadonlySet<string> = new Set([JS_DEPS]);
-const VENV_MARKER = 'pyvenv.cfg';
-// Build and cache outputs stay per worktree: a link would let one branch overwrite the outputs of another.
-const SKIP_NAMES: ReadonlySet<string> = new Set([
-    '.cache',
-    '.eslintcache',
-    '.next',
-    '.turbo',
-    'build',
-    'coverage',
-    'dist',
-    'out',
-]);
-const SKIP_SUFFIX = '.tsbuildinfo';
 const REPLACEMENT_CHARACTER = '\uFFFD';
-
-export function classify(rel: string): EntryClass {
-    const name = path.posix.basename(rel);
-    if (COPY_NAMES.has(name) || name.startsWith(COPY_PREFIX)) {
-        return 'copy';
-    }
-    if (DEPENDENCY_NAMES.has(name)) {
-        return 'dep';
-    }
-    if (SKIP_NAMES.has(name) || name.endsWith(SKIP_SUFFIX)) {
-        return 'skip';
-    }
-    return 'link';
-}
-
-export function isVenvFolder(main: string, rel: string): boolean {
-    const folder = path.join(main, rel);
-    return (
-        lstatOrUndefined(folder)?.isDirectory() === true &&
-        lstatOrUndefined(path.join(folder, VENV_MARKER)) !== undefined
-    );
-}
-
-// An ignored folder of any name that holds pyvenv.cfg is a Python environment, so it is a dependency folder too.
-function entryClass(main: string, rel: string): EntryClass {
-    const kind = classify(rel);
-    return kind === 'link' && isVenvFolder(main, rel) ? 'dep' : kind;
-}
+const NO_OPTIONS: SyncOptions = { links: [], env: {} };
+const CAP_TEXT = `more than ${String(DEFAULT_WALK_LIMITS.maxEntries)} entries or deeper than ${String(DEFAULT_WALK_LIMITS.maxDepth)} levels`;
 
 // The topmost ignored entries of MAIN, relative and without a trailing slash; undefined when git fails.
 async function listIgnored(deps: Deps, main: string): Promise<string[] | undefined> {
@@ -98,42 +91,181 @@ function usableEntries(deps: Deps, rels: readonly string[]): string[] {
     return kept;
 }
 
+// True when REL lies below an entry whose subtree is already handled (linked, skipped, walked or a dependency).
+function isHidden(plan: SyncPlan, rel: string): boolean {
+    for (let index = rel.indexOf('/'); index !== -1; index = rel.indexOf('/', index + 1)) {
+        if (plan.hiding.has(rel.slice(0, index))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// An own link above REL, made by an earlier version for a whole folder, already shares everything below it.
+function isBelowOwnLink(paths: PlanPaths, rel: string): boolean {
+    for (let index = rel.indexOf('/'); index !== -1; index = rel.indexOf('/', index + 1)) {
+        if (isOwnLink(paths, rel.slice(0, index))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function isForced(plan: SyncPlan, rel: string): boolean {
+    return plan.forced.some((forced) => isAtOrAbove(forced, rel));
+}
+
+function addAction(plan: SyncPlan, action: Action): void {
+    if (!plan.planned.has(action.rel)) {
+        plan.planned.add(action.rel);
+        plan.actions.push(action);
+    }
+}
+
+// A capped folder hides nothing, so entries git lists below it still get their actions; its warning comes after
+// planning, once it is known whether any of them was placed.
+function planWalk(deps: Deps, main: string, plan: SyncPlan, rel: string): void {
+    const classify = (childRel: string): EntryClass => classifyEntry(childRel, entryFacts(main, childRel));
+    const result = walkCollapsed(main, rel, classify, (childRel) => isForced(plan, childRel));
+    if (result.kind === 'capped') {
+        plan.capped.push({ rel, placed: false });
+        plan.report.push({ rel, bytes: result.bytes, partial: true });
+        return;
+    }
+    plan.hiding.add(rel);
+    for (const unreadable of result.unreadable) {
+        deps.log.warn(`skipped ${showText(unreadable)}: cannot read it in the main clone`);
+    }
+    for (const find of result.finds) {
+        addAction(plan, { rel: find.rel, kind: find.kind, found: true });
+    }
+    plan.report.push(...result.unlinked);
+}
+
+function planEntry(deps: Deps, paths: PlanPaths, plan: SyncPlan, rel: string): void {
+    const { main } = paths;
+    const kind = classifyEntry(rel, entryFacts(main, rel));
+    switch (kind) {
+        case 'copy':
+        case 'dep':
+        case 'link': {
+            addAction(plan, { rel, kind, found: false });
+            plan.hiding.add(rel);
+            return;
+        }
+        case 'skip': {
+            plan.hiding.add(rel);
+            return;
+        }
+        case 'not-linked': {
+            plan.report.push({ rel, ...boundedSize(path.join(main, rel), DEFAULT_WALK_LIMITS.maxEntries) });
+            return;
+        }
+        case 'walk': {
+            if (isOwnLink(paths, rel)) {
+                plan.hiding.add(rel);
+                return;
+            }
+            planWalk(deps, main, plan, rel);
+            return;
+        }
+    }
+}
+
+// An entry below a capped folder gets its actions but no report entries: the capped folder is reported once.
+function planBelowCapped(deps: Deps, paths: PlanPaths, plan: SyncPlan, rel: string, capped: CappedFolder): void {
+    const before = plan.actions.length;
+    planEntry(deps, paths, { ...plan, report: [] }, rel);
+    if (plan.actions.length > before) {
+        capped.placed = true;
+    }
+}
+
+function warnCapped(deps: Deps, plan: SyncPlan): void {
+    for (const folder of plan.capped) {
+        const outcome = folder.placed
+            ? 'only entries git lists separately were placed'
+            : 'nothing inside it was copied or linked';
+        deps.log.warn(`not expanded ${showText(folder.rel)}: ${CAP_TEXT}; ${outcome}`);
+    }
+}
+
+// Sorted order puts every ancestor before the entries git lists below it, so hiding is decided before they come up.
+function planEntries(deps: Deps, paths: PlanPaths, rels: readonly string[], forced: readonly string[]): SyncPlan {
+    const plan: SyncPlan = { actions: [], report: [], hiding: new Set(), planned: new Set(), capped: [], forced };
+    for (const rel of rels.toSorted()) {
+        if (isForced(plan, rel) || isHidden(plan, rel) || isBelowOwnLink(paths, rel)) {
+            continue;
+        }
+        const capped = plan.capped.find((folder) => rel.startsWith(`${folder.rel}/`));
+        if (capped === undefined) {
+            planEntry(deps, paths, plan, rel);
+        } else {
+            planBelowCapped(deps, paths, plan, rel, capped);
+        }
+    }
+    warnCapped(deps, plan);
+    return plan;
+}
+
+// Parent folders are created as real folders inside the worktree; an entry whose parent cannot be is warned about.
+function parentsReady(run: SyncRun, rel: string): boolean {
+    const parents = ensureParents(run.worktree, rel);
+    if (!parents.ok) {
+        run.deps.log.warn(`skipped ${showText(rel)}: ${blockedReason(parents)}`);
+    }
+    return parents.ok;
+}
+
 // An own link may stand where a copy belongs: the transfer replaces it with the real file.
-function destinationOpen(run: SyncRun, rel: string, kind: EntryClass): boolean {
+function destinationOpen(run: SyncRun, rel: string, kind: ActionKind): boolean {
     return kind === 'copy' ? missingOrOwnLink(run, rel) : lstatOrUndefined(path.join(run.worktree, rel)) === undefined;
 }
 
-// Dependency folders are left to the install stage, which installs them or clones or links them from the main clone.
-async function syncEntry(run: SyncRun, rel: string, kind: EntryClass): Promise<void> {
-    if (kind === 'skip' || kind === 'dep' || !parentInside(run.worktree, rel) || !destinationOpen(run, rel, kind)) {
+// Dependency folders are left to the install stage, which installs them or clones or links them from the main clone;
+// one found by a walk gets its parent folders first, so the stage finds where it belongs.
+async function syncEntry(run: SyncRun, action: Action): Promise<void> {
+    const { rel, kind } = action;
+    if (kind === 'dep') {
+        // A listed one with a missing parent goes on as is: the install stage reports it as no-parent.
+        if (!action.found || parentsReady(run, rel)) {
+            run.depRels.push(rel);
+        }
         return;
     }
-    switch (kind) {
-        case 'copy': {
-            await run.transfer.copyEntry(rel);
-            return;
-        }
-        case 'link': {
-            if (makeLink(run, rel) === 'created') {
-                run.linked.push(rel);
-            }
-            return;
-        }
+    if (!parentsReady(run, rel) || !destinationOpen(run, rel, kind)) {
+        return;
     }
-}
-
-function reportLinks(run: SyncRun): void {
-    if (run.linked.length > 0) {
-        run.deps.log.info(`linked ${run.linked.map((rel) => showText(rel)).join(', ')}`);
+    if (kind === 'copy') {
+        await run.transfer.copyEntry(rel);
+        return;
+    }
+    if (makeLink(run, rel) === 'created') {
+        run.linked.push(rel);
     }
 }
 
 // Copies get no pattern: they are ignored by the repository's own rules; links may not be. Dependency folders get
 // theirs from the install stage.
-function excludedPatterns(run: SyncRun, entries: readonly ClassifiedEntry[]): string[] {
-    return entries
-        .filter((entry) => entry.kind !== 'copy' && entry.kind !== 'dep' && isOwnLink(run, entry.rel))
-        .map((entry) => anchoredPattern(entry.rel));
+function excludedPatterns(run: SyncRun, actions: readonly Action[]): string[] {
+    return actions
+        .filter((action) => action.kind === 'link' && isOwnLink(run, action.rel))
+        .map((action) => anchoredPattern(action.rel));
+}
+
+// Paths that already are the tool's own links in the worktree are shared already, so they are not reported.
+function reportNotLinked(run: SyncRun, report: readonly Unlinked[]): void {
+    const line = notLinkedLine(report.filter((entry) => !isOwnLink(run, entry.rel)));
+    if (line !== undefined) {
+        run.deps.log.info(line);
+    }
+}
+
+// Links and dependency folders the current rules or the --link paths would place again are kept; other own links
+// are named by the legacy check.
+function keptByRules(main: string, forced: readonly string[], rel: string): boolean {
+    const kind = classifyEntry(rel, entryFacts(main, rel));
+    return kind === 'link' || kind === 'dep' || forced.some((link) => isAtOrAbove(link, rel));
 }
 
 // Problems are warnings and never stop the run; nothing that already stands in the worktree is overwritten. Returns
@@ -142,7 +274,8 @@ export async function syncIgnored(
     deps: Deps,
     main: string,
     worktree: string,
-    transfer: EntryTransfer
+    transfer: EntryTransfer,
+    options: SyncOptions = NO_OPTIONS
 ): Promise<string[] | undefined> {
     const listed = await listIgnored(deps, main);
     if (listed === undefined) {
@@ -151,16 +284,20 @@ export async function syncIgnored(
         );
         return undefined;
     }
-    const entries = usableEntries(deps, listed).map((rel) => ({ rel, kind: entryClass(main, rel) }));
-    const run: SyncRun = { deps, main, worktree, transfer, linked: [] };
+    const paths = { main, worktree };
+    const { standing: forced, created: linked } = await placeForcedLinks(deps, paths, options.links);
+    const plan = planEntries(deps, paths, usableEntries(deps, listed), forced);
+    const run: SyncRun = { deps, main, worktree, transfer, linked, depRels: [] };
     // Only copies are placed through temp names here; the dependency clones add the pattern themselves.
-    if (entries.some((entry) => entry.kind === 'copy')) {
+    if (plan.actions.some((action) => action.kind === 'copy')) {
         await addExcludePatterns(deps, worktree, [TEMP_PATTERN]);
     }
-    for (const entry of entries) {
-        await syncEntry(run, entry.rel, entry.kind);
+    for (const action of plan.actions) {
+        await syncEntry(run, action);
     }
-    reportLinks(run);
-    await addExcludePatterns(deps, worktree, excludedPatterns(run, entries));
-    return entries.filter((entry) => entry.kind === 'dep').map((entry) => entry.rel);
+    logLinked(deps, run.linked);
+    await addExcludePatterns(deps, worktree, excludedPatterns(run, plan.actions));
+    await checkLegacyExcludes(deps, { ...paths, env: options.env, keeps: (rel) => keptByRules(main, forced, rel) });
+    reportNotLinked(run, plan.report);
+    return run.depRels;
 }

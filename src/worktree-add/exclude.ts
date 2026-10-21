@@ -11,6 +11,7 @@ export const EXCLUDE_HEADER =
 
 const FAILURE_TAIL = '; the worktree links show as untracked and must be removed before git worktree remove';
 const GLOB_CHARACTERS = /[*?[\\]/gu;
+const ESCAPED_CHARACTER = /\\(.)/gu;
 
 type ReadResult = { ok: true; text: string } | { ok: false };
 
@@ -18,6 +19,16 @@ type ReadResult = { ok: true; text: string } | { ok: false };
 export function anchoredPattern(rel: string): string {
     const escaped = rel.replaceAll(GLOB_CHARACTERS, String.raw`\$&`);
     return `/${escaped.endsWith(' ') ? `${escaped.slice(0, -1)}${String.raw`\ `}` : escaped}`;
+}
+
+// The inverse of anchoredPattern: REL for a line starting with /, undefined for comments, the temp pattern, blanks and
+// a bare / (no path).
+export function patternPath(line: string): string | undefined {
+    if (!line.startsWith('/')) {
+        return;
+    }
+    const rel = line.slice(1).replaceAll(ESCAPED_CHARACTER, '$1');
+    return rel.length > 0 ? rel : undefined;
 }
 
 // A missing file reads as empty; any other read failure means the file cannot be updated safely.
@@ -30,7 +41,7 @@ function readExisting(file: string): ReadResult {
 }
 
 // From a linked worktree git answers the common file of the main clone; a relative answer is relative to WORKTREE.
-async function excludeFilePath(deps: Deps, worktree: string): Promise<string | undefined> {
+export async function excludeFilePath(deps: Deps, worktree: string): Promise<string | undefined> {
     const resolved = await deps.runner.run({
         file: 'git',
         args: ['-C', worktree, 'rev-parse', '--git-path', 'info/exclude'],

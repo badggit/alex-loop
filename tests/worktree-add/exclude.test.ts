@@ -3,7 +3,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 
-import { addExcludePatterns, anchoredPattern, EXCLUDE_HEADER } from '../../src/worktree-add/exclude.ts';
+import {
+    addExcludePatterns,
+    anchoredPattern,
+    EXCLUDE_HEADER,
+    patternPath,
+    TEMP_PATTERN,
+} from '../../src/worktree-add/exclude.ts';
 
 import { testDeps } from './support/deps.ts';
 import { gitSync, makeRepo, testEnv } from './support/git.ts';
@@ -151,4 +157,32 @@ await test('a folder outside any repository gives one warning and creates nothin
     await addExcludePatterns(deps, plain, ['/node_modules']);
     assert.deepEqual(warnMessages(deps.lines), [`cannot find the info/exclude file of the repository${FAILURE_TAIL}`]);
     assert.deepEqual(fs.readdirSync(plain), []);
+});
+
+await test('patternPath inverts anchoredPattern for names with glob characters and trailing spaces', () => {
+    for (const rel of [
+        'node_modules',
+        'src/a*b',
+        'q?x',
+        '[set]',
+        String.raw`back\slash`,
+        'trail ',
+        'two  ',
+        String.raw`a*b?[c]\d `,
+        CYRILLIC_NAME,
+        'my notes/a b',
+    ]) {
+        assert.equal(patternPath(anchoredPattern(rel)), rel);
+    }
+});
+
+await test('patternPath gives undefined for comments, the temp pattern and blank lines', () => {
+    assert.equal(patternPath('# x'), undefined);
+    assert.equal(patternPath(TEMP_PATTERN), undefined);
+    assert.equal(patternPath(''), undefined);
+    assert.equal(patternPath('node_modules'), undefined);
+});
+
+await test('patternPath gives undefined for a line that names no path', () => {
+    assert.equal(patternPath('/'), undefined);
 });

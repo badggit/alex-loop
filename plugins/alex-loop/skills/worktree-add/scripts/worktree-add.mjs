@@ -161,6 +161,22 @@ function suffixProblem(suffix) {
   }
   return;
 }
+function parseLink(value) {
+  if (value.length === 0) {
+    return { ok: false, message: `the ${LINK} value must not be empty` };
+  }
+  if (hasControlCharacter(value)) {
+    return { ok: false, message: `the ${LINK} value contains a control character: ${showText(value)}` };
+  }
+  const link = value.replace(/\/+$/u, "");
+  if (link.split("/").some((component) => BAD_LINK_COMPONENTS.has(component))) {
+    return {
+      ok: false,
+      message: `${LINK} takes a path relative to the repository root, without "..": ${showText(value)}`
+    };
+  }
+  return { ok: true, link };
+}
 function expandParent(value, home) {
   if (value.length === 0) {
     return { ok: false, message: "the --parent value must not be empty" };
@@ -188,6 +204,7 @@ function parseArgs(argv, home) {
   }
   const values = {};
   let install = true;
+  const links = [];
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index] ?? "";
     if (arg === NO_INSTALL) {
@@ -195,6 +212,24 @@ function parseArgs(argv, home) {
         return usage(`${NO_INSTALL} can be given only once`);
       }
       install = false;
+      continue;
+    }
+    if (arg === LINK) {
+      const value2 = argv[index + 1];
+      if (value2 === void 0) {
+        return usage(`missing value for ${LINK}`);
+      }
+      if (value2.startsWith("--")) {
+        return usage(`missing value for ${LINK}: got the option ${showText(value2)}`);
+      }
+      const parsed = parseLink(value2);
+      if (!parsed.ok) {
+        return usage(parsed.message);
+      }
+      if (!links.includes(parsed.link)) {
+        links.push(parsed.link);
+      }
+      index += 1;
       continue;
     }
     if (!isValueOption(arg)) {
@@ -216,23 +251,23 @@ function parseArgs(argv, home) {
     index += 1;
   }
   const suffix = values["--suffix"];
-  if (suffix === void 0) {
+  if (suffix === void 0 && links.length === 0) {
     return usage("--suffix SUFFIX is required");
   }
-  const problem2 = suffixProblem(suffix);
+  const problem2 = suffix === void 0 ? void 0 : suffixProblem(suffix);
   if (problem2 !== void 0) {
     return usage(problem2);
   }
   const parentValue = values["--parent"];
   if (parentValue === void 0) {
-    return { kind: "ok", suffix, parent: void 0, install };
+    return { kind: "ok", suffix, parent: void 0, install, links };
   }
   const expanded = expandParent(parentValue, home);
-  return expanded.ok ? { kind: "ok", suffix, parent: expanded.parent, install } : usage(expanded.message);
+  return expanded.ok ? { kind: "ok", suffix, parent: expanded.parent, install, links } : usage(expanded.message);
 }
 function usageText() {
   return [
-    "Usage: worktree-add.mjs --suffix SUFFIX [--parent DIR] [--no-install]",
+    "Usage: worktree-add.mjs --suffix SUFFIX [--parent DIR] [--no-install] [--link PATH]...",
     "",
     "Creates or reuses the sibling git worktree MAIN-SUFFIX on the branch SUFFIX and prints its absolute path.",
     "",
@@ -240,20 +275,24 @@ function usageText() {
     "  --parent DIR     folder for the worktree (default: the main clone's parent folder);",
     "                   a leading ~ or ~/ is expanded to the home folder, other ~ forms are refused",
     "  --no-install     skip the dependency installs; dependency folders are cloned or linked instead",
+    "  --link PATH      link PATH (relative to the repository root, repeatable) from the main clone into the worktree;",
+    "                   inside a linked worktree it links only these paths and needs no --suffix",
     "  --help           show this help",
     "",
     "Exit codes: 0 success (the path on stdout), 1 refusal or error, 2 wrong arguments.",
     ""
   ].join("\n");
 }
-var NO_INSTALL, MAX_SUFFIX, SUFFIX_PATTERN;
+var NO_INSTALL, LINK, MAX_SUFFIX, SUFFIX_PATTERN, BAD_LINK_COMPONENTS;
 var init_args = __esm({
   "src/worktree-add/args.ts"() {
     "use strict";
     init_text();
     NO_INSTALL = "--no-install";
+    LINK = "--link";
     MAX_SUFFIX = 100;
     SUFFIX_PATTERN = /^[a-z0-9][a-z0-9._-]*$/u;
+    BAD_LINK_COMPONENTS = /* @__PURE__ */ new Set(["", ".", ".."]);
   }
 });
 
@@ -1179,6 +1218,492 @@ var init_facts = __esm({
   }
 });
 
+// src/worktree-add/exclude.ts
+import fs8 from "node:fs";
+import path7 from "node:path";
+function anchoredPattern(rel) {
+  const escaped = rel.replaceAll(GLOB_CHARACTERS, String.raw`\$&`);
+  return `/${escaped.endsWith(" ") ? `${escaped.slice(0, -1)}${String.raw`\ `}` : escaped}`;
+}
+function patternPath(line) {
+  if (!line.startsWith("/")) {
+    return;
+  }
+  const rel = line.slice(1).replaceAll(ESCAPED_CHARACTER, "$1");
+  return rel.length > 0 ? rel : void 0;
+}
+function readExisting(file) {
+  try {
+    return { ok: true, text: fs8.readFileSync(file, "utf8") };
+  } catch (error) {
+    return errorCode(error) === "ENOENT" ? { ok: true, text: "" } : { ok: false };
+  }
+}
+async function excludeFilePath(deps, worktree) {
+  const resolved = await deps.runner.run({
+    file: "git",
+    args: ["-C", worktree, "rev-parse", "--git-path", "info/exclude"]
+  });
+  const [line = ""] = resolved.stdout.split("\n", 1);
+  if (resolved.code !== 0 || line.length === 0) {
+    return;
+  }
+  return path7.resolve(worktree, line);
+}
+function appendText(text, present, missing) {
+  const header = present.has(EXCLUDE_HEADER) ? [] : [EXCLUDE_HEADER];
+  const lead = text.length > 0 && !text.endsWith("\n") ? "\n" : "";
+  return `${lead}${[...header, ...missing].join("\n")}
+`;
+}
+async function addExcludePatterns(deps, worktree, patterns) {
+  if (patterns.length === 0) {
+    return;
+  }
+  const file = await excludeFilePath(deps, worktree);
+  if (file === void 0) {
+    deps.log.warn(`cannot find the info/exclude file of the repository${FAILURE_TAIL}`);
+    return;
+  }
+  const existing = readExisting(file);
+  if (!existing.ok) {
+    deps.log.warn(`cannot update ${showText(file)}${FAILURE_TAIL}`);
+    return;
+  }
+  const present = new Set(existing.text.split("\n"));
+  const missing = [...new Set(patterns)].filter((pattern) => !present.has(pattern));
+  if (missing.length === 0) {
+    return;
+  }
+  try {
+    fs8.mkdirSync(path7.dirname(file), { recursive: true });
+    fs8.appendFileSync(file, appendText(existing.text, present, missing));
+  } catch {
+    deps.log.warn(`cannot update ${showText(file)}${FAILURE_TAIL}`);
+  }
+}
+var TEMP_PATTERN, EXCLUDE_HEADER, FAILURE_TAIL, GLOB_CHARACTERS, ESCAPED_CHARACTER;
+var init_exclude = __esm({
+  "src/worktree-add/exclude.ts"() {
+    "use strict";
+    init_paths();
+    init_text();
+    TEMP_PATTERN = ".alex-loop-tmp-*";
+    EXCLUDE_HEADER = "# alex-loop worktree-add: links, dependency clones and copy temps in worktrees, ignored in the main clone already";
+    FAILURE_TAIL = "; the worktree links show as untracked and must be removed before git worktree remove";
+    GLOB_CHARACTERS = /[*?[\\]/gu;
+    ESCAPED_CHARACTER = /\\(.)/gu;
+  }
+});
+
+// src/worktree-add/fallback.ts
+import fs9 from "node:fs";
+import path8 from "node:path";
+function makeLink(run, rel) {
+  const dest = path8.join(run.worktree, rel);
+  if (lstatOrUndefined(dest) !== void 0) {
+    return "exists";
+  }
+  try {
+    fs9.symlinkSync(path8.join(run.main, rel), dest);
+    return "created";
+  } catch (error) {
+    const code = errorCode(error);
+    if (code === "EEXIST") {
+      return "exists";
+    }
+    run.deps.log.warn(`cannot link ${showText(rel)} into the worktree: ${showText(code)}`);
+    return "failed";
+  }
+}
+function ensureLink(run, rel) {
+  const result = makeLink(run, rel);
+  if (result === "exists") {
+    return isOwnLink(run, rel) ? "linked" : "present";
+  }
+  return result === "created" ? "linked" : "failed";
+}
+async function cloneOrLink(run, rel) {
+  const outcome = await run.transfer.cloneDependency(rel);
+  if (outcome.kind === "cloned") {
+    return "cloned";
+  }
+  const kind = ensureLink(run, rel);
+  if (outcome.kind === "unavailable" && kind === "linked") {
+    run.deps.log.info(`linked ${showText(rel)}: ${showText(outcome.reason)}`);
+  }
+  if (outcome.kind === "failed") {
+    const fallback = kind === "linked" ? "; linked it instead" : "";
+    run.deps.log.warn(`cannot clone ${showText(rel)} into the worktree (${showText(outcome.reason)})${fallback}`);
+  }
+  return kind;
+}
+async function fallbackFor(run, rel) {
+  if (!parentExists(run.worktree, rel)) {
+    return "no-parent";
+  }
+  if (!parentInside(run.worktree, rel) || !missingOrOwnLink(run, rel)) {
+    return "present";
+  }
+  if (path8.posix.basename(rel) === JS_DEPS) {
+    return cloneOrLink(run, rel);
+  }
+  return ensureLink(run, rel);
+}
+async function applyFallback(deps, paths2, transfer, rels) {
+  const run = { deps, main: paths2.main, worktree: paths2.worktree, transfer };
+  const results = [];
+  for (const rel of rels) {
+    results.push({ rel, kind: await fallbackFor(run, rel) });
+  }
+  return results;
+}
+var init_fallback = __esm({
+  "src/worktree-add/fallback.ts"() {
+    "use strict";
+    init_paths();
+    init_text();
+  }
+});
+
+// src/worktree-add/parents.ts
+import fs10 from "node:fs";
+import path9 from "node:path";
+function blockedReason(failure) {
+  const blocker = showText(failure.blocker);
+  if (failure.cause === "mkdir-failed") {
+    return `cannot create its folder ${blocker} in the worktree (${showText(failure.code)})`;
+  }
+  return `its folder ${blocker} in the worktree is a link or not a folder`;
+}
+function blockerFor(stat, blocker) {
+  if (stat.isSymbolicLink()) {
+    return { ok: false, blocker, cause: "link", code: "" };
+  }
+  if (!stat.isDirectory()) {
+    return { ok: false, blocker, cause: "not-a-folder", code: "" };
+  }
+  return void 0;
+}
+function createComponent(file, blocker) {
+  try {
+    fs10.mkdirSync(file);
+    return void 0;
+  } catch (error) {
+    const code = errorCode(error);
+    const stat = code === "EEXIST" ? lstatOrUndefined(file) : void 0;
+    if (stat === void 0) {
+      return { ok: false, blocker, cause: "mkdir-failed", code };
+    }
+    return blockerFor(stat, blocker);
+  }
+}
+function ensureParents(worktree, rel) {
+  const parts = rel.split("/").slice(0, -1);
+  let current = "";
+  for (const part of parts) {
+    current = current === "" ? part : `${current}/${part}`;
+    const file = path9.join(worktree, current);
+    const stat = lstatOrUndefined(file);
+    const failure = stat === void 0 ? createComponent(file, current) : blockerFor(stat, current);
+    if (failure !== void 0) {
+      return failure;
+    }
+  }
+  return { ok: true };
+}
+var init_parents = __esm({
+  "src/worktree-add/parents.ts"() {
+    "use strict";
+    init_paths();
+    init_text();
+  }
+});
+
+// src/worktree-add/rules.ts
+import path10 from "node:path";
+function isCopyName(name) {
+  return COPY_NAMES.has(name) || name.startsWith(COPY_PREFIX);
+}
+function isSkipName(name, facts) {
+  if (name === BUILD_OUTPUT) {
+    return facts.buildManifestBeside;
+  }
+  return SKIP_NAMES.has(name) || SKIP_SUFFIXES.some((suffix) => name.endsWith(suffix)) || SKIP_PREFIXES.some((prefix) => name.startsWith(prefix));
+}
+function isLocalName(name) {
+  return name.endsWith(LOCAL_MARK) ? name.length > LOCAL_MARK.length : name.indexOf(`${LOCAL_MARK}.`) > 0;
+}
+function isTopLinkName(name) {
+  return TOP_LINK_NAMES.has(name) || isLocalName(name);
+}
+function isNestedLink(rel) {
+  return rel === NESTED_LINK_SUFFIX || rel.endsWith(`/${NESTED_LINK_SUFFIX}`);
+}
+function classifyEntry(rel, facts) {
+  const name = path10.posix.basename(rel);
+  const components = rel.split("/");
+  if (isCopyName(name)) {
+    return "copy";
+  }
+  if (name === JS_DEPS || facts.venv) {
+    return "dep";
+  }
+  if (isSkipName(name, facts)) {
+    return "skip";
+  }
+  if (isNestedLink(rel) || LINK_FOLDERS.has(components[0] ?? "")) {
+    return "link";
+  }
+  if (components.length === 1 && isTopLinkName(name)) {
+    return "link";
+  }
+  return facts.directory ? "walk" : "not-linked";
+}
+function entryFacts(main2, rel) {
+  const full = path10.join(main2, rel);
+  const directory = lstatOrUndefined(full)?.isDirectory() === true;
+  const venv = directory && lstatOrUndefined(path10.join(full, VENV_MARKER)) !== void 0;
+  const beside = path10.dirname(full);
+  const buildManifestBeside = path10.basename(rel) === "target" && BUILD_MANIFESTS.some((manifest) => lstatOrUndefined(path10.join(beside, manifest)) !== void 0);
+  return { directory, venv, buildManifestBeside };
+}
+var LINK_FOLDERS, COPY_NAMES, COPY_PREFIX, SKIP_NAMES, SKIP_SUFFIXES, SKIP_PREFIXES, BUILD_OUTPUT, BUILD_MANIFESTS, NESTED_LINK_SUFFIX, TOP_LINK_NAMES, LOCAL_MARK, VENV_MARKER;
+var init_rules = __esm({
+  "src/worktree-add/rules.ts"() {
+    "use strict";
+    init_paths();
+    LINK_FOLDERS = /* @__PURE__ */ new Set([
+      ".idea",
+      ".vscode",
+      ".claude",
+      ".codex",
+      ".cursor",
+      ".gemini",
+      ".zed"
+    ]);
+    COPY_NAMES = /* @__PURE__ */ new Set([
+      ".env",
+      "CLAUDE.local.md",
+      "temp.local",
+      ".npmrc",
+      ".yarnrc",
+      ".yarnrc.yml",
+      "bunfig.toml",
+      "uv.toml",
+      "poetry.toml",
+      ".python-version",
+      ".nvmrc",
+      ".node-version",
+      ".tool-versions",
+      ".envrc"
+    ]);
+    COPY_PREFIX = ".env.";
+    SKIP_NAMES = /* @__PURE__ */ new Set([
+      ".cache",
+      ".eslintcache",
+      ".next",
+      ".turbo",
+      "build",
+      "coverage",
+      "dist",
+      "out",
+      "__pycache__",
+      ".pytest_cache",
+      ".mypy_cache",
+      ".ruff_cache",
+      ".hypothesis",
+      "htmlcov",
+      ".coverage",
+      "coverage.xml",
+      ".tox",
+      ".nox",
+      ".eggs",
+      ".ipynb_checkpoints",
+      ".pytype",
+      ".pyre",
+      ".DS_Store",
+      "Thumbs.db",
+      ".terraform",
+      ".terragrunt-cache",
+      ".vercel",
+      ".netlify",
+      ".serverless",
+      ".aws-sam",
+      ".direnv",
+      ".dart_tool",
+      ".angular",
+      ".nx",
+      ".astro",
+      ".docusaurus",
+      ".expo",
+      ".wrangler",
+      ".svelte-kit",
+      ".nuxt",
+      ".parcel-cache",
+      ".vite",
+      ".gradle"
+    ]);
+    SKIP_SUFFIXES = [
+      ".tsbuildinfo",
+      ".egg-info",
+      ".pyc",
+      ".pyo",
+      ".swp",
+      ".swo",
+      ".orig",
+      ".rej",
+      ".log",
+      "~"
+    ];
+    SKIP_PREFIXES = [".coverage."];
+    BUILD_OUTPUT = "target";
+    BUILD_MANIFESTS = ["Cargo.toml", "pom.xml", "build.gradle", "build.gradle.kts"];
+    NESTED_LINK_SUFFIX = ".claude/settings.local.json";
+    TOP_LINK_NAMES = /* @__PURE__ */ new Set(["AGENTS.md", "CLAUDE.md", "GEMINI.md"]);
+    LOCAL_MARK = ".local";
+    VENV_MARKER = "pyvenv.cfg";
+  }
+});
+
+// src/worktree-add/forcedLinks.ts
+import path11 from "node:path";
+async function listIgnoredAt(deps, main2, rels) {
+  const listed = await deps.runner.run({
+    file: "git",
+    args: [
+      "-C",
+      main2,
+      "ls-files",
+      "-z",
+      "--others",
+      "--ignored",
+      "--exclude-standard",
+      "--directory",
+      "--",
+      ...rels.map((rel) => `:(literal)${rel}`)
+    ]
+  });
+  return listed.code === 0 ? new Set(listed.stdout.split("\0")) : void 0;
+}
+async function isIgnored(deps, main2, rel) {
+  const checked = await deps.runner.run({ file: "git", args: ["-C", main2, "check-ignore", "-q", "--", rel] });
+  if (checked.code === 0) {
+    return true;
+  }
+  const listed = await listIgnoredAt(deps, main2, [rel]);
+  return listed?.has(`${rel}/`) === true;
+}
+async function wholeLinkAncestor(deps, main2, rel) {
+  const parts = rel.split("/");
+  const ancestors = [];
+  for (let count = 1; count < parts.length; count += 1) {
+    const ancestor = parts.slice(0, count).join("/");
+    if (classifyEntry(ancestor, entryFacts(main2, ancestor)) === "link") {
+      ancestors.push(ancestor);
+    }
+  }
+  if (ancestors.length === 0) {
+    return void 0;
+  }
+  const listed = await listIgnoredAt(deps, main2, ancestors);
+  return ancestors.find((ancestor) => listed?.has(`${ancestor}/`) === true || listed?.has(ancestor) === true);
+}
+function ownerClass(main2, rel, kind) {
+  const parts = rel.split("/");
+  for (let count = 1; count < parts.length; count += 1) {
+    const ancestor = parts.slice(0, count).join("/");
+    const ancestorKind = classifyEntry(ancestor, entryFacts(main2, ancestor));
+    if (ancestorKind === "dep" || ancestorKind === "copy") {
+      return ancestorKind;
+    }
+  }
+  return kind;
+}
+async function linkOne(deps, paths2, rel) {
+  const shown = showText(rel);
+  if (lstatOrUndefined(path11.join(paths2.main, rel)) === void 0) {
+    deps.log.warn(`${NOT_LINKED}${shown} does not exist in the main clone`);
+    return false;
+  }
+  if (!await isIgnored(deps, paths2.main, rel)) {
+    deps.log.warn(`${NOT_LINKED}${shown} is not ignored in the main clone`);
+    return false;
+  }
+  const kind = classifyEntry(rel, entryFacts(paths2.main, rel));
+  const owner = ownerClass(paths2.main, rel, kind);
+  if (owner === "dep") {
+    deps.log.warn(`${NOT_LINKED}${shown} is a dependency folder; the install stage handles it`);
+    return false;
+  }
+  if (owner === "copy") {
+    deps.log.warn(`${NOT_LINKED}${shown} is copied per worktree, never linked`);
+    return false;
+  }
+  const linkedWhole = await wholeLinkAncestor(deps, paths2.main, rel);
+  if (linkedWhole !== void 0) {
+    deps.log.warn(`${NOT_LINKED}${shown}: it is inside ${showText(linkedWhole)}, which is linked whole`);
+    return false;
+  }
+  const parents = ensureParents(paths2.worktree, rel);
+  if (!parents.ok) {
+    deps.log.warn(`${NOT_LINKED}${shown}: ${blockedReason(parents)}`);
+    return false;
+  }
+  const result = makeLink({ deps, ...paths2 }, rel);
+  if (result === "failed") {
+    return false;
+  }
+  if (result === "exists" && !isOwnLink(paths2, rel)) {
+    deps.log.warn(`${NOT_LINKED}something else already stands at ${shown} in the worktree`);
+    return false;
+  }
+  if (result === "created" && kind === "skip") {
+    deps.log.warn(`linked ${shown} with --link: build outputs are now shared with the main clone`);
+  }
+  return true;
+}
+function uniqueLinks(links) {
+  return [...new Set(links)];
+}
+async function linkForced(deps, paths2, links) {
+  const linked = [];
+  for (const rel of uniqueLinks(links)) {
+    if (await linkOne(deps, paths2, rel)) {
+      linked.push(rel);
+    }
+  }
+  await addExcludePatterns(
+    deps,
+    paths2.worktree,
+    linked.map((rel) => anchoredPattern(rel))
+  );
+  return linked;
+}
+async function placeForcedLinks(deps, paths2, links) {
+  const before = new Set(uniqueLinks(links).filter((rel) => isOwnLink(paths2, rel)));
+  const standing = await linkForced(deps, paths2, links);
+  return { standing, created: standing.filter((rel) => !before.has(rel)) };
+}
+function logLinked(deps, rels) {
+  if (rels.length > 0) {
+    deps.log.info(`linked ${rels.map((rel) => showText(rel)).join(", ")}`);
+  }
+}
+var NOT_LINKED;
+var init_forcedLinks = __esm({
+  "src/worktree-add/forcedLinks.ts"() {
+    "use strict";
+    init_exclude();
+    init_fallback();
+    init_parents();
+    init_paths();
+    init_rules();
+    init_text();
+    NOT_LINKED = "not linked with --link: ";
+  }
+});
+
 // src/worktree-add/assign.ts
 function splitRel(rel) {
   const slash = rel.lastIndexOf("/");
@@ -1450,8 +1975,8 @@ var init_proc = __esm({
 });
 
 // src/worktree-add/managers.ts
-import fs8 from "node:fs";
-import path7 from "node:path";
+import fs11 from "node:fs";
+import path12 from "node:path";
 function executableOf(manager) {
   return EXECUTABLES[manager];
 }
@@ -1461,22 +1986,22 @@ function isJsFamily(name) {
 function readHead(file) {
   let fd;
   try {
-    fd = fs8.openSync(file, "r");
+    fd = fs11.openSync(file, "r");
     const buffer = Buffer.alloc(HEAD_BYTES);
-    const size = fs8.readSync(fd, buffer, 0, HEAD_BYTES, 0);
+    const size = fs11.readSync(fd, buffer, 0, HEAD_BYTES, 0);
     return buffer.subarray(0, size).toString("utf8");
   } catch {
     return;
   } finally {
     if (fd !== void 0) {
-      fs8.closeSync(fd);
+      fs11.closeSync(fd);
     }
   }
 }
 function readPackageManagerField(projectDir) {
   let parsed;
   try {
-    parsed = JSON.parse(fs8.readFileSync(path7.join(projectDir, "package.json"), "utf8"));
+    parsed = JSON.parse(fs11.readFileSync(path12.join(projectDir, "package.json"), "utf8"));
   } catch {
     return { kind: "absent" };
   }
@@ -1500,7 +2025,7 @@ function exactMajor(name, major) {
   return { text: `${name} ${major}`, accepts: (found) => found === major };
 }
 function yarnKind(projectDir) {
-  const head = readHead(path7.join(projectDir, "yarn.lock")) ?? "";
+  const head = readHead(path12.join(projectDir, "yarn.lock")) ?? "";
   if (/^__metadata:/m.test(head)) {
     return "yarn-berry";
   }
@@ -1510,7 +2035,7 @@ function yarnKind(projectDir) {
   return;
 }
 function yarnPathMajor(projectDir) {
-  const rc = readHead(path7.join(projectDir, ".yarnrc.yml")) ?? "";
+  const rc = readHead(path12.join(projectDir, ".yarnrc.yml")) ?? "";
   const match = /^yarnPath:\s*["']?([^"'\n#]*?)["']?\s*(?:#.*)?$/m.exec(rc);
   const release = /(?:^|\/)yarn-(\d+)\.\d+\.\d+\.cjs$/.exec(match?.[1] ?? "");
   return release?.[1] === void 0 ? void 0 : Number(release[1]);
@@ -1523,7 +2048,7 @@ function berryExpectation(projectDir) {
   return { text: "yarn 2 or newer", accepts: (major) => major >= 2 };
 }
 function pnpmExpectation(projectDir) {
-  const head = readHead(path7.join(projectDir, "pnpm-lock.yaml")) ?? "";
+  const head = readHead(path12.join(projectDir, "pnpm-lock.yaml")) ?? "";
   const match = /^lockfileVersion:\s*["']?(\d+)(?:\.\d+)?["']?\s*$/m.exec(head);
   const majors = match?.[1] === void 0 ? void 0 : PNPM_LOCK_MAJORS.get(Number(match[1]));
   if (majors === void 0) {
@@ -1696,7 +2221,7 @@ var init_managers = __esm({
 });
 
 // src/worktree-add/attempt.ts
-import fs9 from "node:fs";
+import fs12 from "node:fs";
 function uvEnv(timeoutMs) {
   const seconds2 = Math.max(1, Math.ceil(timeoutMs / 1e3));
   return {
@@ -1713,7 +2238,7 @@ function combined(result) {
 }
 function readLock(file) {
   try {
-    return { kind: "bytes", bytes: fs9.readFileSync(file) };
+    return { kind: "bytes", bytes: fs12.readFileSync(file) };
   } catch (error) {
     return errorCode(error) === "ENOENT" ? { kind: "absent" } : { kind: "unreadable", reason: messageOf(error) };
   }
@@ -1741,9 +2266,9 @@ function restoreLocks(snapshot) {
     changed = true;
     try {
       if (before.kind === "absent") {
-        fs9.rmSync(file, { force: true });
+        fs12.rmSync(file, { force: true });
       } else {
-        fs9.writeFileSync(file, before.bytes);
+        fs12.writeFileSync(file, before.bytes);
       }
     } catch (error) {
       problems.push(`${file}: ${messageOf(error)}`);
@@ -1928,7 +2453,7 @@ var init_mask = __esm({
 });
 
 // src/worktree-add/configGuard.ts
-import path8 from "node:path";
+import path13 from "node:path";
 function configGit(deps, file, args) {
   return deps.runner.run({ file: "git", args: ["config", "--file", file, ...args] });
 }
@@ -1983,7 +2508,7 @@ async function snapshotSharedConfig(deps, worktree) {
   if (result.code !== 0 || printed2.length === 0) {
     return;
   }
-  const file = path8.join(path8.resolve(worktree, printed2), "config");
+  const file = path13.join(path13.resolve(worktree, printed2), "config");
   const read = await readConfig(deps, file);
   return read.ok ? { file, entries: read.entries } : void 0;
 }
@@ -2066,8 +2591,8 @@ var init_deadline = __esm({
 });
 
 // src/worktree-add/discover.ts
-import fs10 from "node:fs";
-import path9 from "node:path";
+import fs13 from "node:fs";
+import path14 from "node:path";
 function patternSegments(pattern) {
   let text = pattern.trim();
   while (text.startsWith("./")) {
@@ -2150,7 +2675,7 @@ function matchesWorkspaceGlob(pattern, rel) {
 }
 function readText(file) {
   try {
-    return fs10.readFileSync(file, "utf8");
+    return fs13.readFileSync(file, "utf8");
   } catch {
     return void 0;
   }
@@ -2268,9 +2793,9 @@ function packageJsonWorkspaces(file) {
   return stringsOf(workspaces) ?? (isRecord(workspaces) ? stringsOf(workspaces.packages) ?? [] : []);
 }
 function jsWorkspace(dir) {
-  const yaml = readText(path9.join(dir, "pnpm-workspace.yaml"));
+  const yaml = readText(path14.join(dir, "pnpm-workspace.yaml"));
   const patterns = [
-    ...packageJsonWorkspaces(path9.join(dir, "package.json")),
+    ...packageJsonWorkspaces(path14.join(dir, "package.json")),
     ...(yaml === void 0 ? void 0 : yamlPackages(yaml)) ?? []
   ];
   const include = patterns.filter((pattern) => !pattern.startsWith("!"));
@@ -2278,7 +2803,7 @@ function jsWorkspace(dir) {
   return include.length > 0 ? { include, exclude } : void 0;
 }
 function uvWorkspace(dir) {
-  const text = readText(path9.join(dir, "pyproject.toml"));
+  const text = readText(path14.join(dir, "pyproject.toml"));
   if (text === void 0) {
     return void 0;
   }
@@ -2294,7 +2819,7 @@ function workspaceOf(worktree, project, specs) {
   if (specs.has(key)) {
     return specs.get(key);
   }
-  const dir = path9.join(worktree, project.dir);
+  const dir = path14.join(worktree, project.dir);
   const spec = project.ecosystem === "js" ? jsWorkspace(dir) : uvWorkspace(dir);
   specs.set(key, spec);
   return spec;
@@ -2311,15 +2836,15 @@ function isMember(spec, rel) {
 function groupLocks(files) {
   const groups = /* @__PURE__ */ new Map();
   for (const file of files) {
-    const ecosystem = LOCK_ECOSYSTEMS.get(path9.posix.basename(file));
+    const ecosystem = LOCK_ECOSYSTEMS.get(path14.posix.basename(file));
     if (ecosystem === void 0 || file.split("/").includes("node_modules")) {
       continue;
     }
-    const parent = path9.posix.dirname(file);
+    const parent = path14.posix.dirname(file);
     const dir = parent === "." ? "" : parent;
     const key = `${ecosystem}\0${dir}`;
     const group = groups.get(key) ?? { dir, ecosystem, lockNames: [] };
-    group.lockNames.push(path9.posix.basename(file));
+    group.lockNames.push(path14.posix.basename(file));
     groups.set(key, group);
   }
   return [...groups.values()].map((group) => ({ ...group, lockNames: group.lockNames.toSorted() }));
@@ -2370,76 +2895,6 @@ var init_discover = __esm({
       ["uv.lock", "uv"]
     ]);
     UV_WORKSPACE_TABLE = "tool.uv.workspace";
-  }
-});
-
-// src/worktree-add/exclude.ts
-import fs11 from "node:fs";
-import path10 from "node:path";
-function anchoredPattern(rel) {
-  const escaped = rel.replaceAll(GLOB_CHARACTERS, String.raw`\$&`);
-  return `/${escaped.endsWith(" ") ? `${escaped.slice(0, -1)}${String.raw`\ `}` : escaped}`;
-}
-function readExisting(file) {
-  try {
-    return { ok: true, text: fs11.readFileSync(file, "utf8") };
-  } catch (error) {
-    return errorCode(error) === "ENOENT" ? { ok: true, text: "" } : { ok: false };
-  }
-}
-async function excludeFilePath(deps, worktree) {
-  const resolved = await deps.runner.run({
-    file: "git",
-    args: ["-C", worktree, "rev-parse", "--git-path", "info/exclude"]
-  });
-  const [line = ""] = resolved.stdout.split("\n", 1);
-  if (resolved.code !== 0 || line.length === 0) {
-    return;
-  }
-  return path10.resolve(worktree, line);
-}
-function appendText(text, present, missing) {
-  const header = present.has(EXCLUDE_HEADER) ? [] : [EXCLUDE_HEADER];
-  const lead = text.length > 0 && !text.endsWith("\n") ? "\n" : "";
-  return `${lead}${[...header, ...missing].join("\n")}
-`;
-}
-async function addExcludePatterns(deps, worktree, patterns) {
-  if (patterns.length === 0) {
-    return;
-  }
-  const file = await excludeFilePath(deps, worktree);
-  if (file === void 0) {
-    deps.log.warn(`cannot find the info/exclude file of the repository${FAILURE_TAIL}`);
-    return;
-  }
-  const existing = readExisting(file);
-  if (!existing.ok) {
-    deps.log.warn(`cannot update ${showText(file)}${FAILURE_TAIL}`);
-    return;
-  }
-  const present = new Set(existing.text.split("\n"));
-  const missing = [...new Set(patterns)].filter((pattern) => !present.has(pattern));
-  if (missing.length === 0) {
-    return;
-  }
-  try {
-    fs11.mkdirSync(path10.dirname(file), { recursive: true });
-    fs11.appendFileSync(file, appendText(existing.text, present, missing));
-  } catch {
-    deps.log.warn(`cannot update ${showText(file)}${FAILURE_TAIL}`);
-  }
-}
-var TEMP_PATTERN, EXCLUDE_HEADER, FAILURE_TAIL, GLOB_CHARACTERS;
-var init_exclude = __esm({
-  "src/worktree-add/exclude.ts"() {
-    "use strict";
-    init_paths();
-    init_text();
-    TEMP_PATTERN = ".alex-loop-tmp-*";
-    EXCLUDE_HEADER = "# alex-loop worktree-add: links, dependency clones and copy temps in worktrees, ignored in the main clone already";
-    FAILURE_TAIL = "; the worktree links show as untracked and must be removed before git worktree remove";
-    GLOB_CHARACTERS = /[*?[\\]/gu;
   }
 });
 
@@ -2666,82 +3121,12 @@ var init_failures = __esm({
   }
 });
 
-// src/worktree-add/fallback.ts
-import fs12 from "node:fs";
-import path11 from "node:path";
-function makeLink(run, rel) {
-  const dest = path11.join(run.worktree, rel);
-  if (lstatOrUndefined(dest) !== void 0) {
-    return "exists";
-  }
-  try {
-    fs12.symlinkSync(path11.join(run.main, rel), dest);
-    return "created";
-  } catch (error) {
-    const code = errorCode(error);
-    if (code === "EEXIST") {
-      return "exists";
-    }
-    run.deps.log.warn(`cannot link ${showText(rel)} into the worktree: ${showText(code)}`);
-    return "failed";
-  }
-}
-function ensureLink(run, rel) {
-  const result = makeLink(run, rel);
-  if (result === "exists") {
-    return isOwnLink(run, rel) ? "linked" : "present";
-  }
-  return result === "created" ? "linked" : "failed";
-}
-async function cloneOrLink(run, rel) {
-  const outcome = await run.transfer.cloneDependency(rel);
-  if (outcome.kind === "cloned") {
-    return "cloned";
-  }
-  const kind = ensureLink(run, rel);
-  if (outcome.kind === "unavailable" && kind === "linked") {
-    run.deps.log.info(`linked ${showText(rel)}: ${showText(outcome.reason)}`);
-  }
-  if (outcome.kind === "failed") {
-    const fallback = kind === "linked" ? "; linked it instead" : "";
-    run.deps.log.warn(`cannot clone ${showText(rel)} into the worktree (${showText(outcome.reason)})${fallback}`);
-  }
-  return kind;
-}
-async function fallbackFor(run, rel) {
-  if (!parentExists(run.worktree, rel)) {
-    return "no-parent";
-  }
-  if (!parentInside(run.worktree, rel) || !missingOrOwnLink(run, rel)) {
-    return "present";
-  }
-  if (path11.posix.basename(rel) === JS_DEPS) {
-    return cloneOrLink(run, rel);
-  }
-  return ensureLink(run, rel);
-}
-async function applyFallback(deps, paths2, transfer, rels) {
-  const run = { deps, main: paths2.main, worktree: paths2.worktree, transfer };
-  const results = [];
-  for (const rel of rels) {
-    results.push({ rel, kind: await fallbackFor(run, rel) });
-  }
-  return results;
-}
-var init_fallback = __esm({
-  "src/worktree-add/fallback.ts"() {
-    "use strict";
-    init_paths();
-    init_text();
-  }
-});
-
 // src/worktree-add/cleanup.ts
-import fs13 from "node:fs";
-import path12 from "node:path";
+import fs14 from "node:fs";
+import path15 from "node:path";
 function withoutTrailingSeparators(file) {
   let result = file;
-  while (result.length > 1 && (result.endsWith("/") || result.endsWith(path12.sep))) {
+  while (result.length > 1 && (result.endsWith("/") || result.endsWith(path15.sep))) {
     result = result.slice(0, -1);
   }
   return result;
@@ -2765,7 +3150,7 @@ function refusal(rel) {
   if (rel.length === 0) {
     return "refused an empty path";
   }
-  if (path12.isAbsolute(rel)) {
+  if (path15.isAbsolute(rel)) {
     return `refused an absolute path: ${showText(rel)}`;
   }
   if (rel.split(/[/\\]/u).includes("..")) {
@@ -2785,16 +3170,16 @@ function removeSafely(root, rel) {
   if (!parentInside(root, clean)) {
     return { ok: false, reason: `refused a path whose parent is not inside ${showText(root)}: ${showText(clean)}` };
   }
-  const full = path12.join(root, clean);
+  const full = path15.join(root, clean);
   const stats = lstatOrUndefined(full);
   if (stats === void 0) {
     return { ok: true };
   }
   try {
     if (stats.isDirectory()) {
-      fs13.rmSync(full, { recursive: true, force: true });
+      fs14.rmSync(full, { recursive: true, force: true });
     } else {
-      fs13.unlinkSync(full);
+      fs14.unlinkSync(full);
     }
     return { ok: true };
   } catch (error) {
@@ -2806,7 +3191,7 @@ function isManagerArtifact(rel) {
   return TARGET_NAMES.has(name) || ROOT_ARTIFACTS.has(rel);
 }
 function removeNewYarnFolder(dir) {
-  const full = path12.join(dir, YARN_FOLDER);
+  const full = path15.join(dir, YARN_FOLDER);
   if (lstatOrUndefined(full)?.isDirectory() !== true) {
     return { ok: true };
   }
@@ -2817,8 +3202,8 @@ function removeNewYarnFolder(dir) {
     }
   }
   try {
-    if (fs13.readdirSync(full).length === 0) {
-      fs13.rmdirSync(full);
+    if (fs14.readdirSync(full).length === 0) {
+      fs14.rmdirSync(full);
     }
     return { ok: true };
   } catch (error) {
@@ -2879,8 +3264,8 @@ var init_cleanup = __esm({
 });
 
 // src/worktree-add/privateArea.ts
-import fs14 from "node:fs";
-import path13 from "node:path";
+import fs15 from "node:fs";
+import path16 from "node:path";
 async function privateDir(deps, worktree) {
   const result = await deps.runner.run({ file: "git", args: ["-C", worktree, "rev-parse", "--absolute-git-dir"] });
   const dir = result.stdout.trim();
@@ -2910,27 +3295,27 @@ function logFileName(manager, projectDir) {
   return `${LOG_PREFIX}-${nameSafe(manager)}-${nameSafe(trimmed)}.log`;
 }
 function writeInstallLog(dir, fileName, text) {
-  const file = path13.join(dir, fileName);
-  const noFollow = fs14.constants.O_NOFOLLOW ?? 0;
-  const flags = fs14.constants.O_WRONLY | fs14.constants.O_CREAT | fs14.constants.O_TRUNC | noFollow;
+  const file = path16.join(dir, fileName);
+  const noFollow = fs15.constants.O_NOFOLLOW ?? 0;
+  const flags = fs15.constants.O_WRONLY | fs15.constants.O_CREAT | fs15.constants.O_TRUNC | noFollow;
   let fd;
   try {
-    fd = fs14.openSync(file, flags, LOG_MODE);
-    fs14.fchmodSync(fd, LOG_MODE);
-    fs14.writeFileSync(fd, text);
+    fd = fs15.openSync(file, flags, LOG_MODE);
+    fs15.fchmodSync(fd, LOG_MODE);
+    fs15.writeFileSync(fd, text);
     return { ok: true, path: file };
   } catch (error) {
     return { ok: false, reason: errorCode(error) };
   } finally {
     if (fd !== void 0) {
-      fs14.closeSync(fd);
+      fs15.closeSync(fd);
     }
   }
 }
 function readMarks(dir) {
   let text;
   try {
-    text = fs14.readFileSync(path13.join(dir, PARTIAL_MARKER), "utf8");
+    text = fs15.readFileSync(path16.join(dir, PARTIAL_MARKER), "utf8");
   } catch (error) {
     return errorCode(error) === "ENOENT" ? [] : void 0;
   }
@@ -2940,12 +3325,12 @@ function readPartialMarks(dir) {
   return readMarks(dir) ?? [];
 }
 function writePartialMarks(dir, rels) {
-  const file = path13.join(dir, PARTIAL_MARKER);
+  const file = path16.join(dir, PARTIAL_MARKER);
   try {
     if (rels.length === 0) {
-      fs14.rmSync(file, { force: true });
+      fs15.rmSync(file, { force: true });
     } else {
-      fs14.writeFileSync(file, `${rels.join("\n")}
+      fs15.writeFileSync(file, `${rels.join("\n")}
 `);
     }
     return true;
@@ -2984,7 +3369,7 @@ var init_privateArea = __esm({
 });
 
 // src/worktree-add/leftovers.ts
-import path14 from "node:path";
+import path17 from "node:path";
 function deepestAbove(sites, rel) {
   let best;
   for (const site of sites) {
@@ -2995,7 +3380,7 @@ function deepestAbove(sites, rel) {
   return best;
 }
 function markOwner(sites, rel) {
-  const ecosystem = path14.posix.basename(rel) === JS_DEPS ? "js" : "uv";
+  const ecosystem = path17.posix.basename(rel) === JS_DEPS ? "js" : "uv";
   return deepestAbove(
     sites.filter((site) => site.ecosystem === ecosystem),
     rel
@@ -3024,7 +3409,7 @@ function removeMarkedLeftovers(scope, owns) {
   if (firstReason === void 0) {
     return { ok: true };
   }
-  const command = removalCommand(failed.map((rel) => path14.join(scope.worktree, rel)));
+  const command = removalCommand(failed.map((rel) => path17.join(scope.worktree, rel)));
   return {
     ok: false,
     failed,
@@ -3042,7 +3427,7 @@ var init_leftovers = __esm({
 });
 
 // src/worktree-add/installProject.ts
-import path15 from "node:path";
+import path18 from "node:path";
 function ranManager(outcome) {
   return outcome.kind === "installed" || outcome.kind === "failed";
 }
@@ -3071,13 +3456,13 @@ function projectCommand(project, command) {
   return project.dir === "" ? command : `cd ${shellWord(project.dir)} && ${command}`;
 }
 function projectPath(run) {
-  return path15.join(run.ctx.worktree, run.project.dir);
+  return path18.join(run.ctx.worktree, run.project.dir);
 }
 function absolutePaths(run, rels) {
-  return rels.map((rel) => path15.join(run.ctx.worktree, rel));
+  return rels.map((rel) => path18.join(run.ctx.worktree, rel));
 }
 function missingTargets(run) {
-  return run.targets.filter((rel) => lstatOrUndefined(path15.join(run.ctx.worktree, rel)) === void 0);
+  return run.targets.filter((rel) => lstatOrUndefined(path18.join(run.ctx.worktree, rel)) === void 0);
 }
 function addMarks(run, rels) {
   const dir = run.ctx.privateDir;
@@ -3136,7 +3521,7 @@ function clearProjectLeftovers(ctx, project, label) {
 }
 function blockedTargets(run) {
   return run.targets.filter(
-    (rel) => lstatOrUndefined(path15.join(run.ctx.worktree, rel)) !== void 0 && !isOwnLink(run.ctx, rel)
+    (rel) => lstatOrUndefined(path18.join(run.ctx.worktree, rel)) !== void 0 && !isOwnLink(run.ctx, rel)
   );
 }
 function shownList(rels) {
@@ -3276,7 +3661,7 @@ async function installChecked(run, deadlineMs) {
     manager: run.manager,
     projectDir: projectPath(run),
     label: run.label,
-    lockFiles: run.project.lockNames.map((name) => path15.join(projectPath(run), name)),
+    lockFiles: run.project.lockNames.map((name) => path18.join(projectPath(run), name)),
     deadlineMs,
     nowMs: run.ctx.nowMs,
     networkTimeoutMs: run.ctx.networkTimeoutMs,
@@ -3299,7 +3684,7 @@ async function installProject(ctx, project, deadlineMs, choice) {
     ctx.deps.log.warn(`cannot install dependencies in ${projectPlace(project)}: ${showText(choice.reason)}`);
     return { kind: "not-installed" };
   }
-  const projectDir = path15.join(ctx.worktree, project.dir);
+  const projectDir = path18.join(ctx.worktree, project.dir);
   const { manager } = choice;
   const run = { ctx, project, manager, label: projectLabel(project, name), targets: targetFolders(project) };
   const leftMs = deadlineMs - ctx.nowMs();
@@ -3349,7 +3734,7 @@ var init_installProject = __esm({
 });
 
 // src/worktree-add/installStage.ts
-import path16 from "node:path";
+import path19 from "node:path";
 function shownList2(rels) {
   return rels.map((rel) => showText(rel)).join(", ");
 }
@@ -3410,8 +3795,8 @@ async function sandboxFallback(stage, planned) {
   ctx.deps.log.info(`installs skipped: the network is disabled in this sandbox${done.join("")}${tail}`);
 }
 function orphanReason(rel, projects) {
-  if (path16.posix.basename(rel) === JS_DEPS) {
-    const parent = rel.includes("/") ? path16.posix.dirname(rel) : "";
+  if (path19.posix.basename(rel) === JS_DEPS) {
+    const parent = rel.includes("/") ? path19.posix.dirname(rel) : "";
     const owner = projects.filter((project) => project.ecosystem === "js" && isAtOrAbove(project.dir, parent)).toSorted((a, b) => b.dir.length - a.dir.length)[0];
     return owner === void 0 ? `${showText(rel)} belongs to no project with a supported lock file` : `${showText(rel)} is outside the workspaces of the JS project in ${projectPlace(owner)}`;
   }
@@ -3419,7 +3804,7 @@ function orphanReason(rel, projects) {
 }
 function kindText(result) {
   if (result.kind === "no-parent") {
-    return `skipped: ${showText(path16.posix.dirname(result.rel))} does not exist in the worktree`;
+    return `skipped: ${showText(path19.posix.dirname(result.rel))} does not exist in the worktree`;
   }
   return ORPHAN_KIND_TEXT[result.kind];
 }
@@ -3460,7 +3845,7 @@ function reportNotStarted(stage, plan) {
   clearProjectLeftovers(ctx, project, labelOf(plan));
   const { manager, command } = commandOf(plan);
   const missing = targetFolders(project).filter(
-    (rel) => lstatOrUndefined(path16.join(request.worktree, rel)) === void 0
+    (rel) => lstatOrUndefined(path19.join(request.worktree, rel)) === void 0
   );
   const lines = failureLines({
     manager,
@@ -3568,7 +3953,7 @@ async function runInstallStage(request) {
   );
   const planned = assignment.projects.map((project) => ({
     project,
-    choice: chooseManager(path16.join(worktree, project.dir), project.ecosystem, project.lockNames)
+    choice: chooseManager(path19.join(worktree, project.dir), project.ecosystem, project.lockNames)
   }));
   const stage = {
     request,
@@ -3635,7 +4020,7 @@ var init_installStage = __esm({
 });
 
 // src/worktree-add/repo.ts
-import path17 from "node:path";
+import path20 from "node:path";
 function gitIn(deps, dir, args) {
   return deps.runner.run({ file: "git", args: ["-C", dir, ...args] });
 }
@@ -3652,7 +4037,7 @@ function failureLine3(result) {
 async function canonicalDir(deps, dir, flag) {
   const result = await gitIn(deps, dir, ["rev-parse", flag]);
   const value = withoutFinalNewline(result.stdout);
-  return result.code === 0 && value.length > 0 ? canonical(path17.resolve(dir, value)) : void 0;
+  return result.code === 0 && value.length > 0 ? canonical(path20.resolve(dir, value)) : void 0;
 }
 async function gitDirsOf(deps, dir) {
   const gitDir = await canonicalDir(deps, dir, "--absolute-git-dir");
@@ -3733,7 +4118,7 @@ var init_repo = __esm({
 });
 
 // src/worktree-add/start.ts
-import path18 from "node:path";
+import path21 from "node:path";
 function git3(deps, dir, args) {
   return deps.runner.run({ file: "git", args: ["-C", dir, ...args] });
 }
@@ -3853,7 +4238,7 @@ async function logSameTicket(deps, main2, suffix, target) {
   }
   const entries = await listWorktrees(deps, main2);
   const others = (entries ?? []).filter(
-    (entry) => !matchesTarget(entry.path, target) && namesTicket(path18.basename(entry.path), key)
+    (entry) => !matchesTarget(entry.path, target) && namesTicket(path21.basename(entry.path), key)
   );
   if (others.length === 0) {
     return;
@@ -3876,29 +4261,335 @@ var init_start = __esm({
   }
 });
 
+// src/worktree-add/legacy.ts
+import fs16 from "node:fs";
+import path22 from "node:path";
+function splitLines(text) {
+  const result = { block: [], user: [] };
+  let inBlock = false;
+  for (const line of text.split("\n")) {
+    if (line.startsWith("#")) {
+      inBlock = line === EXCLUDE_HEADER;
+      continue;
+    }
+    if (line.trim().length > 0) {
+      (inBlock ? result.block : result.user).push(line);
+    }
+  }
+  return result;
+}
+function blockPaths(lines) {
+  const seen = /* @__PURE__ */ new Set();
+  const result = [];
+  for (const line of lines.block) {
+    const rel = patternPath(line);
+    if (rel !== void 0 && !seen.has(rel)) {
+      seen.add(rel);
+      result.push({ rel, line });
+    }
+  }
+  return result;
+}
+function readExclude(file) {
+  try {
+    return { ok: true, value: fs16.readFileSync(file, "utf8") };
+  } catch (error) {
+    return errorCode(error) === "ENOENT" ? { ok: true, value: "" } : { ok: false, reason: `cannot read ${showText(file)}` };
+  }
+}
+function defaultGlobalExcludes(env) {
+  const xdg = env.XDG_CONFIG_HOME;
+  if (xdg !== void 0 && xdg.length > 0) {
+    return path22.join(xdg, "git", "ignore");
+  }
+  return env.HOME === void 0 ? void 0 : path22.join(env.HOME, ".config", "git", "ignore");
+}
+async function globalExcludes(deps, main2, env) {
+  const result = await deps.runner.run({
+    file: "git",
+    args: ["-C", main2, "config", "--path", "--get", "core.excludesFile"]
+  });
+  if (result.code !== 0 && result.code !== CONFIG_KEY_MISSING) {
+    return { ok: false, reason: failureLine(result) };
+  }
+  const [configured = ""] = result.stdout.split("\n", 1);
+  let file = defaultGlobalExcludes(env);
+  if (result.code === 0 && configured.length > 0) {
+    file = path22.resolve(main2, configured);
+  }
+  return { ok: true, value: file !== void 0 && fs16.existsSync(file) ? file : void 0 };
+}
+async function listHidden(deps, request, lines, paths2) {
+  const global = await globalExcludes(deps, request.main, request.env);
+  if (!global.ok) {
+    return global;
+  }
+  const result = await deps.runner.run({
+    file: "git",
+    args: [
+      "-C",
+      request.main,
+      "ls-files",
+      "-z",
+      "--others",
+      "--directory",
+      "--no-empty-directory",
+      "--exclude-per-directory=.gitignore",
+      ...global.value === void 0 ? [] : [`--exclude-from=${global.value}`],
+      ...lines.user.map((line) => `--exclude=${line}`),
+      "--",
+      ...paths2.map((entry) => `:(literal)${entry.rel}`)
+    ]
+  });
+  if (result.code !== 0) {
+    return { ok: false, reason: failureLine(result) };
+  }
+  const entries = result.stdout.split("\0").filter((entry) => entry.length > 0);
+  return { ok: true, value: entries.map((entry) => entry.replace(/\/$/u, "")) };
+}
+function shownExcludeFile(main2, file) {
+  const relative = path22.relative(main2, file);
+  const outside = relative === ".." || relative.startsWith(`..${path22.sep}`) || path22.isAbsolute(relative);
+  return showText(outside ? file : relative);
+}
+function hidingWarning(shownFile, entry, hidden) {
+  const count = hidden.length === 1 ? "1 file" : `${String(hidden.length)} files`;
+  const named = hidden.slice(0, NAMED_PATHS).map((listed) => showText(listed));
+  const names = hidden.length > NAMED_PATHS ? [...named, "..."] : named;
+  return `${shownFile} line ${showText(entry.line)} hides ${count} that .gitignore does not ignore (${names.join(", ")}); git status and git add skip ${hidden.length === 1 ? "it" : "them"}. Remove the worktree-add links at ${showText(entry.rel)} in every worktree first, then this line`;
+}
+async function checkLegacyExcludes(deps, request) {
+  const fail = (reason) => {
+    deps.log.warn(`cannot check the worktree-add lines of the exclude file: ${reason}`);
+  };
+  const file = await excludeFilePath(deps, request.main);
+  if (file === void 0) {
+    fail("cannot find the info/exclude file of the repository");
+    return;
+  }
+  const text = readExclude(file);
+  if (!text.ok) {
+    fail(text.reason);
+    return;
+  }
+  const lines = splitLines(text.value);
+  const paths2 = blockPaths(lines);
+  if (paths2.length === 0) {
+    return;
+  }
+  const listed = await listHidden(deps, request, lines, paths2);
+  if (!listed.ok) {
+    fail(listed.reason);
+    return;
+  }
+  const shownFile = shownExcludeFile(request.main, file);
+  for (const entry of paths2) {
+    const hidden = listed.value.filter((listedPath) => isAtOrAbove(entry.rel, listedPath));
+    if (hidden.length > 0) {
+      deps.log.warn(hidingWarning(shownFile, entry, hidden));
+    }
+  }
+  const outside = paths2.map((entry) => entry.rel).filter((rel) => isOwnLink(request, rel) && !request.keeps(rel));
+  if (outside.length > 0) {
+    deps.log.info(
+      `this worktree has links to the main clone outside the current rules: ${outside.map((rel) => showText(rel)).join(", ")}`
+    );
+  }
+}
+var NAMED_PATHS, CONFIG_KEY_MISSING;
+var init_legacy = __esm({
+  "src/worktree-add/legacy.ts"() {
+    "use strict";
+    init_exclude();
+    init_paths();
+    init_text();
+    NAMED_PATHS = 3;
+    CONFIG_KEY_MISSING = 1;
+  }
+});
+
+// src/worktree-add/notLinked.ts
+function formatSize(bytes, partial = false) {
+  const mark = partial ? "+" : "";
+  if (bytes < KB) {
+    return `${String(bytes)} B${mark}`;
+  }
+  const kilobytes = Math.round(bytes / KB);
+  if (kilobytes < KB) {
+    return `${String(kilobytes)} KB${mark}`;
+  }
+  const megabytes = Math.round(bytes / MB);
+  if (megabytes < KB) {
+    return `${String(megabytes)} MB${mark}`;
+  }
+  return `${(bytes / GB).toFixed(1)} GB${mark}`;
+}
+function bySizeThenPath(left, right) {
+  if (left.bytes !== right.bytes) {
+    return right.bytes - left.bytes;
+  }
+  if (left.rel === right.rel) {
+    return 0;
+  }
+  return left.rel < right.rel ? -1 : 1;
+}
+function notLinkedLine(entries) {
+  if (entries.length === 0) {
+    return;
+  }
+  const sorted = entries.toSorted(bySizeThenPath);
+  const named = sorted.slice(0, REPORT_LIMIT).map((entry) => `${showText(entry.rel)} (${formatSize(entry.bytes, entry.partial)})`).join(", ");
+  const rest = sorted.length - REPORT_LIMIT;
+  const more = rest > 0 ? ` and ${String(rest)} more` : "";
+  return `not linked: ${named}${more}; ${HINT}`;
+}
+var REPORT_LIMIT, KB, MB, GB, HINT;
+var init_notLinked = __esm({
+  "src/worktree-add/notLinked.ts"() {
+    "use strict";
+    init_text();
+    REPORT_LIMIT = 10;
+    KB = 1024;
+    MB = KB * KB;
+    GB = MB * KB;
+    HINT = "to share one with the main clone, run worktree-add --link PATH inside the worktree";
+  }
+});
+
+// src/worktree-add/walk.ts
+import fs17 from "node:fs";
+import path23 from "node:path";
+function readNames(state, folderRel) {
+  try {
+    return fs17.readdirSync(path23.join(state.main, folderRel)).toSorted();
+  } catch {
+    state.unreadable.push(folderRel);
+    return;
+  }
+}
+function reportFor(childRel, outcome) {
+  if (outcome.placed) {
+    return outcome.children;
+  }
+  return outcome.reportable ? [{ rel: childRel, bytes: outcome.bytes, partial: false }] : [];
+}
+function walkFolder(state, folderRel, depth) {
+  const outcome = { placed: false, reportable: false, bytes: 0, children: [] };
+  const names = readNames(state, folderRel);
+  if (names === void 0) {
+    return outcome;
+  }
+  for (const name of names) {
+    const childRel = `${folderRel}/${name}`;
+    if (state.handled(childRel)) {
+      outcome.placed = true;
+      continue;
+    }
+    state.visited += 1;
+    if (state.visited > state.limits.maxEntries) {
+      state.capped = true;
+      return outcome;
+    }
+    const stat = lstatOrUndefined(path23.join(state.main, childRel));
+    const size = stat?.size ?? 0;
+    state.bytes += size;
+    const kind = state.classify(childRel);
+    if (kind !== "skip") {
+      outcome.bytes += size;
+    }
+    switch (kind) {
+      case "copy":
+      case "dep":
+      case "link": {
+        state.finds.push({ rel: childRel, kind });
+        outcome.placed = true;
+        break;
+      }
+      case "not-linked": {
+        outcome.reportable = true;
+        outcome.children.push({ rel: childRel, bytes: size, partial: false });
+        break;
+      }
+      case "walk": {
+        if (stat?.isDirectory() !== true) {
+          outcome.reportable = true;
+          outcome.children.push({ rel: childRel, bytes: size, partial: false });
+          break;
+        }
+        if (depth + 1 > state.limits.maxDepth) {
+          state.capped = true;
+          return outcome;
+        }
+        const inner = walkFolder(state, childRel, depth + 1);
+        if (state.capped) {
+          return outcome;
+        }
+        outcome.bytes += inner.bytes;
+        outcome.placed ||= inner.placed;
+        outcome.reportable ||= inner.reportable;
+        outcome.children.push(...reportFor(childRel, inner));
+        break;
+      }
+      case "skip": {
+        break;
+      }
+    }
+  }
+  return outcome;
+}
+function walkCollapsed(main2, rel, classify, handled, limits = DEFAULT_WALK_LIMITS) {
+  const state = {
+    main: main2,
+    classify,
+    handled,
+    limits,
+    visited: 0,
+    bytes: 0,
+    capped: false,
+    finds: [],
+    unreadable: []
+  };
+  const outcome = walkFolder(state, rel, 0);
+  if (state.capped) {
+    return { kind: "capped", bytes: state.bytes };
+  }
+  return { kind: "expanded", finds: state.finds, unlinked: reportFor(rel, outcome), unreadable: state.unreadable };
+}
+function boundedSize(file, maxEntries) {
+  const pending = [file];
+  let bytes = 0;
+  let count = 0;
+  for (let next = pending.pop(); next !== void 0; next = pending.pop()) {
+    if (count >= maxEntries) {
+      return { bytes, partial: true };
+    }
+    count += 1;
+    const stat = lstatOrUndefined(next);
+    bytes += stat?.size ?? 0;
+    if (stat?.isDirectory() !== true) {
+      continue;
+    }
+    try {
+      for (const name of fs17.readdirSync(next)) {
+        pending.push(path23.join(next, name));
+      }
+    } catch {
+      continue;
+    }
+  }
+  return { bytes, partial: false };
+}
+var DEFAULT_WALK_LIMITS;
+var init_walk = __esm({
+  "src/worktree-add/walk.ts"() {
+    "use strict";
+    init_paths();
+    DEFAULT_WALK_LIMITS = { maxEntries: 5e3, maxDepth: 6 };
+  }
+});
+
 // src/worktree-add/sync.ts
-import path19 from "node:path";
-function classify(rel) {
-  const name = path19.posix.basename(rel);
-  if (COPY_NAMES.has(name) || name.startsWith(COPY_PREFIX)) {
-    return "copy";
-  }
-  if (DEPENDENCY_NAMES.has(name)) {
-    return "dep";
-  }
-  if (SKIP_NAMES.has(name) || name.endsWith(SKIP_SUFFIX)) {
-    return "skip";
-  }
-  return "link";
-}
-function isVenvFolder(main2, rel) {
-  const folder = path19.join(main2, rel);
-  return lstatOrUndefined(folder)?.isDirectory() === true && lstatOrUndefined(path19.join(folder, VENV_MARKER)) !== void 0;
-}
-function entryClass(main2, rel) {
-  const kind = classify(rel);
-  return kind === "link" && isVenvFolder(main2, rel) ? "dep" : kind;
-}
+import path24 from "node:path";
 async function listIgnored(deps, main2) {
   const listed = await deps.runner.run({
     file: "git",
@@ -3922,35 +4613,149 @@ function usableEntries(deps, rels) {
   }
   return kept;
 }
-function destinationOpen(run, rel, kind) {
-  return kind === "copy" ? missingOrOwnLink(run, rel) : lstatOrUndefined(path19.join(run.worktree, rel)) === void 0;
+function isHidden(plan, rel) {
+  for (let index = rel.indexOf("/"); index !== -1; index = rel.indexOf("/", index + 1)) {
+    if (plan.hiding.has(rel.slice(0, index))) {
+      return true;
+    }
+  }
+  return false;
 }
-async function syncEntry(run, rel, kind) {
-  if (kind === "skip" || kind === "dep" || !parentInside(run.worktree, rel) || !destinationOpen(run, rel, kind)) {
+function isBelowOwnLink(paths2, rel) {
+  for (let index = rel.indexOf("/"); index !== -1; index = rel.indexOf("/", index + 1)) {
+    if (isOwnLink(paths2, rel.slice(0, index))) {
+      return true;
+    }
+  }
+  return false;
+}
+function isForced(plan, rel) {
+  return plan.forced.some((forced) => isAtOrAbove(forced, rel));
+}
+function addAction(plan, action) {
+  if (!plan.planned.has(action.rel)) {
+    plan.planned.add(action.rel);
+    plan.actions.push(action);
+  }
+}
+function planWalk(deps, main2, plan, rel) {
+  const classify = (childRel) => classifyEntry(childRel, entryFacts(main2, childRel));
+  const result = walkCollapsed(main2, rel, classify, (childRel) => isForced(plan, childRel));
+  if (result.kind === "capped") {
+    plan.capped.push({ rel, placed: false });
+    plan.report.push({ rel, bytes: result.bytes, partial: true });
     return;
   }
+  plan.hiding.add(rel);
+  for (const unreadable of result.unreadable) {
+    deps.log.warn(`skipped ${showText(unreadable)}: cannot read it in the main clone`);
+  }
+  for (const find of result.finds) {
+    addAction(plan, { rel: find.rel, kind: find.kind, found: true });
+  }
+  plan.report.push(...result.unlinked);
+}
+function planEntry(deps, paths2, plan, rel) {
+  const { main: main2 } = paths2;
+  const kind = classifyEntry(rel, entryFacts(main2, rel));
   switch (kind) {
-    case "copy": {
-      await run.transfer.copyEntry(rel);
-      return;
-    }
+    case "copy":
+    case "dep":
     case "link": {
-      if (makeLink(run, rel) === "created") {
-        run.linked.push(rel);
+      addAction(plan, { rel, kind, found: false });
+      plan.hiding.add(rel);
+      return;
+    }
+    case "skip": {
+      plan.hiding.add(rel);
+      return;
+    }
+    case "not-linked": {
+      plan.report.push({ rel, ...boundedSize(path24.join(main2, rel), DEFAULT_WALK_LIMITS.maxEntries) });
+      return;
+    }
+    case "walk": {
+      if (isOwnLink(paths2, rel)) {
+        plan.hiding.add(rel);
+        return;
       }
+      planWalk(deps, main2, plan, rel);
       return;
     }
   }
 }
-function reportLinks(run) {
-  if (run.linked.length > 0) {
-    run.deps.log.info(`linked ${run.linked.map((rel) => showText(rel)).join(", ")}`);
+function planBelowCapped(deps, paths2, plan, rel, capped) {
+  const before = plan.actions.length;
+  planEntry(deps, paths2, { ...plan, report: [] }, rel);
+  if (plan.actions.length > before) {
+    capped.placed = true;
   }
 }
-function excludedPatterns(run, entries) {
-  return entries.filter((entry) => entry.kind !== "copy" && entry.kind !== "dep" && isOwnLink(run, entry.rel)).map((entry) => anchoredPattern(entry.rel));
+function warnCapped(deps, plan) {
+  for (const folder of plan.capped) {
+    const outcome = folder.placed ? "only entries git lists separately were placed" : "nothing inside it was copied or linked";
+    deps.log.warn(`not expanded ${showText(folder.rel)}: ${CAP_TEXT}; ${outcome}`);
+  }
 }
-async function syncIgnored(deps, main2, worktree, transfer) {
+function planEntries(deps, paths2, rels, forced) {
+  const plan = { actions: [], report: [], hiding: /* @__PURE__ */ new Set(), planned: /* @__PURE__ */ new Set(), capped: [], forced };
+  for (const rel of rels.toSorted()) {
+    if (isForced(plan, rel) || isHidden(plan, rel) || isBelowOwnLink(paths2, rel)) {
+      continue;
+    }
+    const capped = plan.capped.find((folder) => rel.startsWith(`${folder.rel}/`));
+    if (capped === void 0) {
+      planEntry(deps, paths2, plan, rel);
+    } else {
+      planBelowCapped(deps, paths2, plan, rel, capped);
+    }
+  }
+  warnCapped(deps, plan);
+  return plan;
+}
+function parentsReady(run, rel) {
+  const parents = ensureParents(run.worktree, rel);
+  if (!parents.ok) {
+    run.deps.log.warn(`skipped ${showText(rel)}: ${blockedReason(parents)}`);
+  }
+  return parents.ok;
+}
+function destinationOpen(run, rel, kind) {
+  return kind === "copy" ? missingOrOwnLink(run, rel) : lstatOrUndefined(path24.join(run.worktree, rel)) === void 0;
+}
+async function syncEntry(run, action) {
+  const { rel, kind } = action;
+  if (kind === "dep") {
+    if (!action.found || parentsReady(run, rel)) {
+      run.depRels.push(rel);
+    }
+    return;
+  }
+  if (!parentsReady(run, rel) || !destinationOpen(run, rel, kind)) {
+    return;
+  }
+  if (kind === "copy") {
+    await run.transfer.copyEntry(rel);
+    return;
+  }
+  if (makeLink(run, rel) === "created") {
+    run.linked.push(rel);
+  }
+}
+function excludedPatterns(run, actions) {
+  return actions.filter((action) => action.kind === "link" && isOwnLink(run, action.rel)).map((action) => anchoredPattern(action.rel));
+}
+function reportNotLinked(run, report2) {
+  const line = notLinkedLine(report2.filter((entry) => !isOwnLink(run, entry.rel)));
+  if (line !== void 0) {
+    run.deps.log.info(line);
+  }
+}
+function keptByRules(main2, forced, rel) {
+  const kind = classifyEntry(rel, entryFacts(main2, rel));
+  return kind === "link" || kind === "dep" || forced.some((link) => isAtOrAbove(link, rel));
+}
+async function syncIgnored(deps, main2, worktree, transfer, options = NO_OPTIONS) {
   const listed = await listIgnored(deps, main2);
   if (listed === void 0) {
     deps.log.warn(
@@ -3958,52 +4763,49 @@ async function syncIgnored(deps, main2, worktree, transfer) {
     );
     return void 0;
   }
-  const entries = usableEntries(deps, listed).map((rel) => ({ rel, kind: entryClass(main2, rel) }));
-  const run = { deps, main: main2, worktree, transfer, linked: [] };
-  if (entries.some((entry) => entry.kind === "copy")) {
+  const paths2 = { main: main2, worktree };
+  const { standing: forced, created: linked } = await placeForcedLinks(deps, paths2, options.links);
+  const plan = planEntries(deps, paths2, usableEntries(deps, listed), forced);
+  const run = { deps, main: main2, worktree, transfer, linked, depRels: [] };
+  if (plan.actions.some((action) => action.kind === "copy")) {
     await addExcludePatterns(deps, worktree, [TEMP_PATTERN]);
   }
-  for (const entry of entries) {
-    await syncEntry(run, entry.rel, entry.kind);
+  for (const action of plan.actions) {
+    await syncEntry(run, action);
   }
-  reportLinks(run);
-  await addExcludePatterns(deps, worktree, excludedPatterns(run, entries));
-  return entries.filter((entry) => entry.kind === "dep").map((entry) => entry.rel);
+  logLinked(deps, run.linked);
+  await addExcludePatterns(deps, worktree, excludedPatterns(run, plan.actions));
+  await checkLegacyExcludes(deps, { ...paths2, env: options.env, keeps: (rel) => keptByRules(main2, forced, rel) });
+  reportNotLinked(run, plan.report);
+  return run.depRels;
 }
-var COPY_NAMES, COPY_PREFIX, DEPENDENCY_NAMES, VENV_MARKER, SKIP_NAMES, SKIP_SUFFIX, REPLACEMENT_CHARACTER;
+var REPLACEMENT_CHARACTER, NO_OPTIONS, CAP_TEXT;
 var init_sync = __esm({
   "src/worktree-add/sync.ts"() {
     "use strict";
     init_exclude();
     init_fallback();
+    init_forcedLinks();
+    init_legacy();
+    init_notLinked();
+    init_parents();
     init_paths();
+    init_rules();
     init_text();
-    COPY_NAMES = /* @__PURE__ */ new Set([".env", "CLAUDE.local.md", "temp.local"]);
-    COPY_PREFIX = ".env.";
-    DEPENDENCY_NAMES = /* @__PURE__ */ new Set([JS_DEPS]);
-    VENV_MARKER = "pyvenv.cfg";
-    SKIP_NAMES = /* @__PURE__ */ new Set([
-      ".cache",
-      ".eslintcache",
-      ".next",
-      ".turbo",
-      "build",
-      "coverage",
-      "dist",
-      "out"
-    ]);
-    SKIP_SUFFIX = ".tsbuildinfo";
+    init_walk();
     REPLACEMENT_CHARACTER = "\uFFFD";
+    NO_OPTIONS = { links: [], env: {} };
+    CAP_TEXT = `more than ${String(DEFAULT_WALK_LIMITS.maxEntries)} entries or deeper than ${String(DEFAULT_WALK_LIMITS.maxDepth)} levels`;
   }
 });
 
 // src/worktree-add/target.ts
-import path20 from "node:path";
+import path25 from "node:path";
 function joinedRaw(cwd, parentArg) {
-  return path20.isAbsolute(parentArg) ? parentArg : `${cwd}/${parentArg}`;
+  return path25.isAbsolute(parentArg) ? parentArg : `${cwd}/${parentArg}`;
 }
 function deriveTarget(suffix, parentArg, cwd, main2) {
-  const mainName = path20.basename(main2);
+  const mainName = path25.basename(main2);
   if (hasControlCharacter(mainName)) {
     return {
       ok: false,
@@ -4011,7 +4813,7 @@ function deriveTarget(suffix, parentArg, cwd, main2) {
       message: `the main folder name contains a control character: ${showText(main2)}`
     };
   }
-  const parent = canonicalLoose(parentArg === void 0 ? path20.dirname(main2) : joinedRaw(cwd, parentArg));
+  const parent = canonicalLoose(parentArg === void 0 ? path25.dirname(main2) : joinedRaw(cwd, parentArg));
   const stats = lstatOrUndefined(parent);
   if (stats !== void 0 && !stats.isDirectory()) {
     return {
@@ -4029,7 +4831,7 @@ function deriveTarget(suffix, parentArg, cwd, main2) {
       branch: suffix,
       parent,
       parentMissing: stats === void 0,
-      path: path20.join(parent, name)
+      path: path25.join(parent, name)
     }
   };
 }
@@ -4042,7 +4844,7 @@ var init_target = __esm({
 });
 
 // src/worktree-add/transfer.ts
-import path21 from "node:path";
+import path26 from "node:path";
 function seconds(startedMs, endedMs) {
   return ((endedMs - startedMs) / 1e3).toFixed(1);
 }
@@ -4066,11 +4868,11 @@ function createTransfer(deps, options) {
   const { main: main2, worktree, gate } = options;
   const nowMs = options.nowMs ?? (() => Date.now());
   const placementOf = (rel) => ({
-    source: path21.join(main2, rel),
-    dest: path21.join(worktree, rel)
+    source: path26.join(main2, rel),
+    dest: path26.join(worktree, rel)
   });
   const sweep = (placement) => {
-    sweepDeadTemps(path21.dirname(placement.dest), pidAlive, deps.pid);
+    sweepDeadTemps(path26.dirname(placement.dest), pidAlive, deps.pid);
   };
   return {
     async copyEntry(rel) {
@@ -4126,7 +4928,7 @@ var init_transfer = __esm({
 
 // src/worktree-add/command.ts
 import os from "node:os";
-import path22 from "node:path";
+import path27 from "node:path";
 function refused(reason) {
   return { kind: "refused", reason };
 }
@@ -4136,6 +4938,17 @@ function usage2(message) {
 function stayInLinked(deps, repo) {
   const from = repo.mainFound ? `; run it from the main working tree ${showText(repo.main)} to create one` : "";
   deps.log.info(`already in the worktree ${showText(repo.current)}: no new worktree is created${from}`);
+  return { kind: "ok", path: repo.current };
+}
+async function linkInLinked(deps, repo, parsed) {
+  if (!repo.mainFound) {
+    return refused("cannot use --link here: the main working tree of this repository was not found");
+  }
+  if (parsed.suffix !== void 0 || parsed.parent !== void 0) {
+    deps.log.info("--suffix and --parent are ignored inside a linked worktree: only the --link paths are linked");
+  }
+  const placed = await placeForcedLinks(deps, { main: repo.main, worktree: repo.current }, parsed.links);
+  logLinked(deps, placed.created);
   return { kind: "ok", path: repo.current };
 }
 async function stepFor(deps, repo, target, decision) {
@@ -4160,9 +4973,9 @@ async function stepFor(deps, repo, target, decision) {
     }
   }
 }
-async function syncQuietly(deps, repo, target, transfer) {
+async function syncQuietly(deps, repo, target, transfer, options) {
   try {
-    return await syncIgnored(deps, repo.main, target.path, transfer);
+    return await syncIgnored(deps, repo.main, target.path, transfer, options);
   } catch (error) {
     deps.log.warn(
       `cannot sync ignored paths into the worktree: ${messageOf(error)}; the dependency fallback from the main clone is skipped and nested projects are not installed automatically`
@@ -4192,7 +5005,7 @@ async function syncAndInstall(io, context) {
     worktree: target.path,
     gate: io.gate ?? createCloneGate()
   });
-  const depRels = await syncQuietly(deps, repo, target, transfer);
+  const depRels = await syncQuietly(deps, repo, target, transfer, { links: context.links, env: io.env });
   if (depRels === void 0 && context.noInstall) {
     return;
   }
@@ -4216,7 +5029,7 @@ async function prepareTarget(io, repo, suffix, parent) {
     return { ok: false, outcome: derived.code === 2 ? usage2(derived.message) : refused(derived.message) };
   }
   const { target } = derived;
-  deps.log.info(`name based on main clone folder ${showText(path22.basename(repo.main))}`);
+  deps.log.info(`name based on main clone folder ${showText(path27.basename(repo.main))}`);
   const name = await checkBranchName(deps, repo.current, target.branch);
   if (name === "invalid") {
     return { ok: false, outcome: usage2(`invalid branch name: ${showText(target.branch)}`) };
@@ -4243,7 +5056,10 @@ async function runWorktreeAdd(io, argv) {
   }
   const { repo } = located;
   if (repo.linked) {
-    return stayInLinked(deps, repo);
+    return parsed.links.length > 0 ? linkInLinked(deps, repo, parsed) : stayInLinked(deps, repo);
+  }
+  if (parsed.suffix === void 0) {
+    return usage2("--suffix SUFFIX is required");
   }
   const prepared = await prepareTarget(io, repo, parsed.suffix, parsed.parent);
   if (!prepared.ok) {
@@ -4262,7 +5078,7 @@ async function runWorktreeAdd(io, argv) {
   if (!applied.ok) {
     return refused(applied.reason);
   }
-  await syncAndInstall(io, { repo, target, noInstall: !parsed.install, startedMs });
+  await syncAndInstall(io, { repo, target, noInstall: !parsed.install, links: parsed.links, startedMs });
   return { kind: "ok", path: target.path };
 }
 var init_command = __esm({
@@ -4273,6 +5089,7 @@ var init_command = __esm({
     init_create();
     init_decide();
     init_facts();
+    init_forcedLinks();
     init_installStage();
     init_repo();
     init_start();
@@ -4285,10 +5102,10 @@ var init_command = __esm({
 });
 
 // src/worktree-add/temps.ts
-import fs15 from "node:fs";
+import fs18 from "node:fs";
 function removeQuietly3(file) {
   try {
-    fs15.rmSync(file, { recursive: true, force: true });
+    fs18.rmSync(file, { recursive: true, force: true });
   } catch {
     return;
   }
@@ -4321,7 +5138,7 @@ var main_exports = {};
 __export(main_exports, {
   main: () => main
 });
-import fs16 from "node:fs";
+import fs19 from "node:fs";
 function stoppable(inner) {
   let stopped = false;
   return {
@@ -4361,12 +5178,12 @@ function installSignalCleanup(deps, runner) {
   return uninstall;
 }
 function writeStderr(text) {
-  fs16.writeSync(2, text);
+  fs19.writeSync(2, text);
 }
 function report(deps, outcome) {
   switch (outcome.kind) {
     case "ok": {
-      fs16.writeSync(1, `${outcome.path}
+      fs19.writeSync(1, `${outcome.path}
 `);
       return 0;
     }

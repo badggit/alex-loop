@@ -59,7 +59,7 @@ const IGNORED_FILES = [
     'venv/pyvenv.cfg',
     'config/.env',
 ];
-const COPY_RELS = ['.env', 'CLAUDE.local.md', 'apps/web/.env.local', 'temp.local'];
+const COPY_RELS = ['.env', 'CLAUDE.local.md', 'apps/web/.env.local', 'config/.env', 'temp.local'];
 const DEP_RELS = ['.venv', 'node_modules', 'venv'];
 const DEAD_PID = 999_999_999;
 const UNAVAILABLE_GATE: CloneGate = {
@@ -204,7 +204,7 @@ function assertCopies(fixture: Fixture): void {
     assert.equal(env.isFile(), true);
     assert.equal(env.mode & 0o777, 0o600);
     assert.equal(fs.readFileSync(path.join(worktree, '.env'), 'utf8'), 'SECRET=1\n');
-    for (const rel of ['apps/web/.env.local', 'CLAUDE.local.md', 'temp.local/notes/a.txt']) {
+    for (const rel of ['apps/web/.env.local', 'CLAUDE.local.md', 'config/.env', 'temp.local/notes/a.txt']) {
         assert.equal(isFile(path.join(worktree, rel)), true, rel);
         assert.equal(fs.readFileSync(path.join(worktree, rel), 'utf8'), `${rel}\n`);
     }
@@ -277,6 +277,7 @@ await test('nested entries land at exactly their own paths', async (t) => {
             'apps/web/.env.local',
             'CLAUDE.local.md',
             'config',
+            'config/.env',
             'docs.local',
             'temp.local',
             'temp.local/link',
@@ -285,6 +286,7 @@ await test('nested entries land at exactly their own paths', async (t) => {
         ].toSorted()
     );
     assert.equal(linkText(path.join(worktree, 'docs.local')), path.join(main, 'docs.local'));
+    assert.equal(fs.lstatSync(path.join(worktree, 'config')).isDirectory(), true);
     for (const rel of ['.env.local', 'apps/web/temp.local', 'apps/web/docs.local']) {
         assert.equal(fs.lstatSync(path.join(worktree, rel), { throwIfNoEntry: false }), undefined, rel);
     }
@@ -335,7 +337,7 @@ await test('a failing copy warns, leaves nothing behind and the rest still syncs
     assert.equal(fs.lstatSync(path.join(worktree, 'temp.local'), { throwIfNoEntry: false }), undefined);
     assert.deepEqual(tempsUnder(worktree), []);
     const methods = copyMethods(deps.lines);
-    assert.deepEqual([...methods.keys()].toSorted(), ['.env', 'CLAUDE.local.md', 'apps/web/.env.local']);
+    assert.deepEqual([...methods.keys()].toSorted(), ['.env', 'CLAUDE.local.md', 'apps/web/.env.local', 'config/.env']);
     assert.equal(linkText(path.join(worktree, 'docs.local')), path.join(main, 'docs.local'));
     assert.equal(fs.lstatSync(path.join(worktree, 'node_modules'), { throwIfNoEntry: false }), undefined);
 });
