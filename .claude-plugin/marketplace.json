@@ -2,7 +2,7 @@
   "$schema": "https://www.schemastore.org/claude-code-marketplace.json",
   "name": "alex-loop",
   "description": "Marketplace for the alex-loop plugin: the design-to-implementation skill chain with an adversarial challenge pass and a multi-agent verifier.",
-  "version": "1.16.0",
+  "version": "1.17.0",
   "owner": {
     "name": "badggit"
   },
