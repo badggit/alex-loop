@@ -1,15 +1,16 @@
 import os from 'node:os';
 import path from 'node:path';
 
-import { parseArgs } from './args.ts';
+import { parseArgs, type ParsedArgs } from './args.ts';
 import { createCloneGate } from './cowGate.ts';
 import { applyStep } from './create.ts';
 import { decideWorktree } from './decide.ts';
 import { gatherFacts } from './facts.ts';
+import { logLinked, placeForcedLinks } from './forcedLinks.ts';
 import { DEFAULT_TIMING, runInstallStage, type InstallStageRequest, type InstallTiming } from './installStage.ts';
 import { checkBranchName, locateRepository } from './repo.ts';
 import { logExistingBranch, logSameTicket, startPoint } from './start.ts';
-import { syncIgnored } from './sync.ts';
+import { syncIgnored, type SyncOptions } from './sync.ts';
 import { deriveTarget } from './target.ts';
 import { messageOf, showText } from './text.ts';
 import { createTransfer } from './transfer.ts';
@@ -56,6 +57,23 @@ function stayInLinked(deps: Deps, repo: RepoLayout): Outcome {
     return { kind: 'ok', path: repo.current };
 }
 
+// Inside a linked worktree --link only links into that worktree: nothing is created, synced or installed.
+async function linkInLinked(
+    deps: Deps,
+    repo: RepoLayout,
+    parsed: Pick<Extract<ParsedArgs, { kind: 'ok' }>, 'suffix' | 'parent' | 'links'>
+): Promise<Outcome> {
+    if (!repo.mainFound) {
+        return refused('cannot use --link here: the main working tree of this repository was not found');
+    }
+    if (parsed.suffix !== undefined || parsed.parent !== undefined) {
+        deps.log.info('--suffix and --parent are ignored inside a linked worktree: only the --link paths are linked');
+    }
+    const placed = await placeForcedLinks(deps, { main: repo.main, worktree: repo.current }, parsed.links);
+    logLinked(deps, placed.created);
+    return { kind: 'ok', path: repo.current };
+}
+
 async function stepFor(deps: Deps, repo: RepoLayout, target: WorktreeTarget, decision: Decision): Promise<StepResult> {
     if (decision.kind === 'refuse') {
         return { ok: false, outcome: refused(decision.reason) };
@@ -87,10 +105,11 @@ async function syncQuietly(
     deps: Deps,
     repo: RepoLayout,
     target: WorktreeTarget,
-    transfer: EntryTransfer
+    transfer: EntryTransfer,
+    options: SyncOptions
 ): Promise<string[] | undefined> {
     try {
-        return await syncIgnored(deps, repo.main, target.path, transfer);
+        return await syncIgnored(deps, repo.main, target.path, transfer, options);
     } catch (error) {
         deps.log.warn(
             `cannot sync ignored paths into the worktree: ${messageOf(error)}; ` +
@@ -120,7 +139,13 @@ async function installQuietly(request: InstallStageRequest): Promise<void> {
 
 async function syncAndInstall(
     io: CommandIo,
-    context: { repo: RepoLayout; target: WorktreeTarget; noInstall: boolean; startedMs: number }
+    context: {
+        repo: RepoLayout;
+        target: WorktreeTarget;
+        noInstall: boolean;
+        links: readonly string[];
+        startedMs: number;
+    }
 ): Promise<void> {
     const { deps } = io;
     const { repo, target } = context;
@@ -129,7 +154,7 @@ async function syncAndInstall(
         worktree: target.path,
         gate: io.gate ?? createCloneGate(),
     });
-    const depRels = await syncQuietly(deps, repo, target, transfer);
+    const depRels = await syncQuietly(deps, repo, target, transfer, { links: context.links, env: io.env });
     // With --no-install the stage only clones or links the main clone's folders, which are unknown here.
     if (depRels === undefined && context.noInstall) {
         return;
@@ -190,7 +215,10 @@ export async function runWorktreeAdd(io: CommandIo, argv: readonly string[]): Pr
     }
     const { repo } = located;
     if (repo.linked) {
-        return stayInLinked(deps, repo);
+        return parsed.links.length > 0 ? linkInLinked(deps, repo, parsed) : stayInLinked(deps, repo);
+    }
+    if (parsed.suffix === undefined) {
+        return usage('--suffix SUFFIX is required');
     }
     const prepared = await prepareTarget(io, repo, parsed.suffix, parsed.parent);
     if (!prepared.ok) {
@@ -209,6 +237,6 @@ export async function runWorktreeAdd(io: CommandIo, argv: readonly string[]): Pr
     if (!applied.ok) {
         return refused(applied.reason);
     }
-    await syncAndInstall(io, { repo, target, noInstall: !parsed.install, startedMs });
+    await syncAndInstall(io, { repo, target, noInstall: !parsed.install, links: parsed.links, startedMs });
     return { kind: 'ok', path: target.path };
 }

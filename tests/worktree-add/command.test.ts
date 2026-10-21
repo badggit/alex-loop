@@ -11,6 +11,7 @@ import type { CloneGate, CommandRequest, CommandRunner, Deps, Env, Outcome } fro
 import { testDeps } from './support/deps.ts';
 import { commitFile, gitSync, makeRepo, testEnv } from './support/git.ts';
 import { recording, withOverride, withoutCow } from './support/runners.ts';
+import { linkTextOf, makeScenario, messages, runScenario, type Scenario } from './support/scenario.ts';
 import { isolatedBin, withPath } from './support/stubManagers.ts';
 import { tempRoot } from './support/tmp.ts';
 import { writeStubTool } from './support/tools.ts';
@@ -377,4 +378,149 @@ await test('the install stage runs for a reused, an existing and a tracked workt
         assert.ok(modules.isDirectory() && !modules.isSymbolicLink(), all);
         assert.deepEqual(fs.readdirSync(path.join(target, 'node_modules')), ['from-stub']);
     }
+});
+
+const IGNORED_IN_LINKED =
+    'info --suffix and --parent are ignored inside a linked worktree: only the --link paths are linked';
+
+// A main clone app whose ignored data folder the rules leave unlinked, so only --link links it.
+function makeLinkScenario(t: TestContext): Scenario {
+    return makeScenario(t, { ignore: 'data/\n', ignored: { 'data/a.txt': 'a\n' } });
+}
+
+function ownLinkOf(s: Scenario, worktree: string, rel: string): boolean {
+    return linkTextOf(path.join(worktree, rel)) === path.join(s.main, rel);
+}
+
+await test('--link inside a linked worktree links only that path and runs nothing else', async (t) => {
+    const s = makeLinkScenario(t);
+    const target = okPath(await runScenario(s, ['--suffix', 't']));
+    assert.equal(linkTextOf(path.join(target, 'data')), undefined);
+    s.deps.lines.length = 0;
+    assert.equal(okPath(await runScenario(s, ['--link', 'data'], target)), target);
+    assert.ok(ownLinkOf(s, target, 'data'));
+    assert.deepEqual(messages(s), ['info linked data']);
+});
+
+await test('--link from the main clone links in the same run', async (t) => {
+    const s = makeLinkScenario(t);
+    const target = okPath(await runScenario(s, ['--suffix', 't', '--link', 'data']));
+    assert.equal(target, path.join(s.root, 'app-t'));
+    assert.ok(ownLinkOf(s, target, 'data'));
+    assert.ok(messages(s).includes('info linked data'), messages(s).join('\n'));
+});
+
+await test('--suffix with --link inside a linked worktree is ignored and creates no worktree', async (t) => {
+    const s = makeLinkScenario(t);
+    const target = okPath(await runScenario(s, ['--suffix', 't']));
+    const before = fs.readdirSync(s.root).toSorted();
+    s.deps.lines.length = 0;
+    assert.equal(okPath(await runScenario(s, ['--suffix', 'other', '--link', 'data'], target)), target);
+    assert.deepEqual(messages(s), [IGNORED_IN_LINKED, 'info linked data']);
+    assert.deepEqual(fs.readdirSync(s.root).toSorted(), before);
+    assert.ok(ownLinkOf(s, target, 'data'));
+});
+
+await test('a run without --link inside a linked worktree links nothing', async (t) => {
+    const s = makeLinkScenario(t);
+    const target = okPath(await runScenario(s, ['--suffix', 't']));
+    s.deps.lines.length = 0;
+    assert.equal(okPath(await runScenario(s, ['--suffix', 'other'], target)), target);
+    assert.deepEqual(messages(s), [
+        `info already in the worktree ${target}: no new worktree is created; run it from the main working tree ${s.main} to create one`,
+    ]);
+    assert.equal(linkTextOf(path.join(target, 'data')), undefined);
+});
+
+await test('--link alone from the main clone still needs --suffix', async (t) => {
+    const s = makeLinkScenario(t);
+    const before = fs.readdirSync(s.root).toSorted();
+    assert.deepEqual(await runScenario(s, ['--link', 'data']), {
+        kind: 'usage',
+        message: '--suffix SUFFIX is required',
+    });
+    assert.deepEqual(fs.readdirSync(s.root).toSorted(), before);
+});
+
+await test('--link inside a linked worktree of a bare repository is refused', async (t) => {
+    const s = makeLinkScenario(t);
+    const hubTree = path.join(s.root, 'hub-tree');
+    gitSync(s.env, ['-C', path.join(s.root, 'origin.git'), 'worktree', 'add', '--quiet', hubTree, 'main']);
+    const real = fs.realpathSync.native(hubTree);
+    assert.deepEqual(await runScenario(s, ['--link', 'data'], real), {
+        kind: 'refused',
+        reason: 'cannot use --link here: the main working tree of this repository was not found',
+    });
+    assert.equal(linkTextOf(path.join(real, 'data')), undefined);
+});
+
+await test('--link of a path missing from the main clone inside a linked worktree only warns', async (t) => {
+    const s = makeLinkScenario(t);
+    const target = okPath(await runScenario(s, ['--suffix', 't']));
+    s.deps.lines.length = 0;
+    assert.equal(okPath(await runScenario(s, ['--link', 'missing'], target)), target);
+    assert.deepEqual(messages(s), ['warn not linked with --link: missing does not exist in the main clone']);
+    assert.equal(fs.existsSync(path.join(target, 'missing')), false);
+});
+
+await test('a repeated --link inside a linked worktree names nothing again', async (t) => {
+    const s = makeLinkScenario(t);
+    const target = okPath(await runScenario(s, ['--suffix', 't']));
+    okPath(await runScenario(s, ['--link', 'data'], target));
+    s.deps.lines.length = 0;
+    assert.equal(okPath(await runScenario(s, ['--link', 'data'], target)), target);
+    assert.deepEqual(messages(s), []);
+    assert.ok(ownLinkOf(s, target, 'data'));
+});
+
+await test('--parent with --link inside a linked worktree is ignored once and creates nothing else', async (t) => {
+    const s = makeLinkScenario(t);
+    const target = okPath(await runScenario(s, ['--suffix', 't']));
+    const before = fs.readdirSync(s.root).toSorted();
+    const targetBefore = fs.readdirSync(target).toSorted();
+    s.deps.lines.length = 0;
+    assert.equal(okPath(await runScenario(s, ['--parent', '../x', '--link', 'data'], target)), target);
+    assert.deepEqual(messages(s), [IGNORED_IN_LINKED, 'info linked data']);
+    assert.deepEqual(fs.readdirSync(s.root).toSorted(), before);
+    assert.deepEqual(fs.readdirSync(target).toSorted(), [...targetBefore, 'data'].toSorted());
+    assert.ok(ownLinkOf(s, target, 'data'));
+});
+
+await test('--no-install with --link from the main clone links the path and installs nothing', async (t) => {
+    const f = makeInstallFixture(t);
+    fs.appendFileSync(path.join(f.main, '.git', 'info', 'exclude'), 'data/\n');
+    fs.mkdirSync(path.join(f.main, 'data'));
+    fs.writeFileSync(path.join(f.main, 'data', 'a.txt'), 'a\n');
+    const runner = recording(f.deps.runner);
+    f.deps.runner = runner;
+    const target = okPath(await runWith(f, ['--suffix', 't', '--no-install', '--link', 'data'], {}));
+    const all = f.deps.lines.join('\n');
+    assert.equal(linkTextOf(path.join(target, 'data')), path.join(f.main, 'data'), all);
+    assert.equal(fs.readlinkSync(path.join(target, 'node_modules')), path.join(f.main, 'node_modules'), all);
+    assert.ok(logged(f, 'info installs skipped (--no-install): linked node_modules'), all);
+    assert.equal(runner.calls.filter((request) => path.basename(request.file) === 'npm').length, 0, all);
+});
+
+await test('--suffix with --link inside a linked worktree of a bare repository is refused without the ignored line', async (t) => {
+    const s = makeLinkScenario(t);
+    const hubTree = path.join(s.root, 'hub-tree');
+    gitSync(s.env, ['-C', path.join(s.root, 'origin.git'), 'worktree', 'add', '--quiet', hubTree, 'main']);
+    const real = fs.realpathSync.native(hubTree);
+    s.deps.lines.length = 0;
+    assert.deepEqual(await runScenario(s, ['--suffix', 'x', '--link', 'data'], real), {
+        kind: 'refused',
+        reason: 'cannot use --link here: the main working tree of this repository was not found',
+    });
+    assert.equal(messages(s).includes(IGNORED_IN_LINKED), false, messages(s).join('\n'));
+    assert.equal(linkTextOf(path.join(real, 'data')), undefined);
+});
+
+await test('--link outside any git repository is refused, not a usage error', async (t) => {
+    const s = makeLinkScenario(t);
+    const outside = path.join(s.root, 'outside');
+    fs.mkdirSync(outside);
+    assert.deepEqual(await runScenario(s, ['--link', 'data'], outside), {
+        kind: 'refused',
+        reason: `not a git repository: ${outside}`,
+    });
 });

@@ -30,12 +30,14 @@ await test('parseArgs accepts the suffix alone and options in any order', () => 
         suffix: SUFFIX,
         parent: undefined,
         install: true,
+        links: [],
     });
     assert.deepEqual(parseArgs(['--parent', '../wt', '--suffix', 'x'], HOME), {
         kind: 'ok',
         suffix: 'x',
         parent: '../wt',
         install: true,
+        links: [],
     });
 });
 
@@ -45,14 +47,22 @@ await test('parseArgs reads --no-install at any position', () => {
         suffix: 'a',
         parent: undefined,
         install: false,
+        links: [],
     });
     assert.deepEqual(parseArgs(['--suffix', 'a', '--no-install'], HOME), {
         kind: 'ok',
         suffix: 'a',
         parent: undefined,
         install: false,
+        links: [],
     });
-    assert.deepEqual(parseArgs(['--suffix', 'a'], HOME), { kind: 'ok', suffix: 'a', parent: undefined, install: true });
+    assert.deepEqual(parseArgs(['--suffix', 'a'], HOME), {
+        kind: 'ok',
+        suffix: 'a',
+        parent: undefined,
+        install: true,
+        links: [],
+    });
 });
 
 await test('parseArgs keeps the --parent value next to --no-install', () => {
@@ -61,12 +71,14 @@ await test('parseArgs keeps the --parent value next to --no-install', () => {
         suffix: 'a',
         parent: '../wt',
         install: false,
+        links: [],
     });
     assert.deepEqual(parseArgs(['--parent', '~/wt', '--no-install', '--suffix', 'a'], HOME), {
         kind: 'ok',
         suffix: 'a',
         parent: `${HOME}/wt`,
         install: false,
+        links: [],
     });
 });
 
@@ -92,6 +104,7 @@ await test('parseArgs accepts suffixes within the rule', () => {
             suffix,
             parent: undefined,
             install: true,
+            links: [],
         });
     }
 });
@@ -134,6 +147,82 @@ await test('parseArgs refuses ~user, an empty parent and a parent with a control
     assert.ok(tabbed.includes('a?b'));
 });
 
+await test('parseArgs collects repeated --link values and strips trailing slashes', () => {
+    assert.deepEqual(parseArgs(['--suffix', 't', '--link', 'data', '--link', 'backend/db.sqlite3/'], HOME), {
+        kind: 'ok',
+        suffix: 't',
+        parent: undefined,
+        install: true,
+        links: ['data', 'backend/db.sqlite3'],
+    });
+    assert.deepEqual(parseArgs(['--suffix', 't', '--link', 'cache///'], HOME), {
+        kind: 'ok',
+        suffix: 't',
+        parent: undefined,
+        install: true,
+        links: ['cache'],
+    });
+});
+
+await test('parseArgs accepts --link without --suffix', () => {
+    assert.deepEqual(parseArgs(['--link', '.idea'], HOME), {
+        kind: 'ok',
+        suffix: undefined,
+        parent: undefined,
+        install: true,
+        links: ['.idea'],
+    });
+});
+
+await test('parseArgs keeps the first position of a repeated --link value', () => {
+    assert.deepEqual(parseArgs(['--link', 'a', '--link', 'b', '--link', 'a/'], HOME), {
+        kind: 'ok',
+        suffix: undefined,
+        parent: undefined,
+        install: true,
+        links: ['a', 'b'],
+    });
+});
+
+await test('parseArgs keeps --link next to --no-install and --parent in any order', () => {
+    const expected = { kind: 'ok', suffix: 'a', parent: '../wt', install: false, links: ['x', 'y'] };
+    assert.deepEqual(
+        parseArgs(['--link', 'x', '--no-install', '--suffix', 'a', '--parent', '../wt', '--link', 'y'], HOME),
+        expected
+    );
+    assert.deepEqual(
+        parseArgs(['--parent', '../wt', '--link', 'x', '--suffix', 'a', '--link', 'y', '--no-install'], HOME),
+        expected
+    );
+});
+
+await test('parseArgs still validates --suffix when --link is given', () => {
+    assert.match(usageMessage(['--link', 'a', '--suffix', 'Bad']), /the suffix must start with/u);
+});
+
+await test('parseArgs refuses bad --link values with the pinned messages', () => {
+    const relative = (value: string): string =>
+        `--link takes a path relative to the repository root, without "..": ${value}`;
+    assert.equal(usageMessage(['--link', '']), 'the --link value must not be empty');
+    assert.equal(usageMessage(['--link', '/etc/passwd']), relative('/etc/passwd'));
+    assert.equal(usageMessage(['--link', '../x']), relative('../x'));
+    assert.equal(usageMessage(['--link', 'a/../b']), relative('a/../b'));
+    assert.equal(usageMessage(['--link', '.']), relative('.'));
+    assert.equal(usageMessage(['--link', './']), relative('./'));
+    assert.equal(usageMessage(['--link', './.idea']), relative('./.idea'));
+    assert.equal(usageMessage(['--link', 'a/./b']), relative('a/./b'));
+    assert.equal(usageMessage(['--link', 'a//b']), relative('a//b'));
+    assert.equal(usageMessage(['--link', 'a/.']), relative('a/.'));
+    assert.equal(usageMessage(['--link', 'a\u0001']), 'the --link value contains a control character: a?');
+    assert.equal(usageMessage(['--link', '--no-install']), 'missing value for --link: got the option --no-install');
+    assert.equal(usageMessage(['--link']), 'missing value for --link');
+});
+
+await test('parseArgs still requires --suffix without --link', () => {
+    assert.equal(usageMessage([]), '--suffix SUFFIX is required');
+    assert.equal(usageMessage(['--no-install']), '--suffix SUFFIX is required');
+});
+
 await test('usageText names the options, the ~ expansion and the exit codes', () => {
     const text = usageText();
     for (const part of ['--suffix SUFFIX', '--parent DIR', '--help', '~/', '0', '1', '2']) {
@@ -144,11 +233,23 @@ await test('usageText names the options, the ~ expansion and the exit codes', ()
 
 await test('usageText names the --no-install flag and what it does', () => {
     const text = usageText();
-    assert.ok(text.startsWith('Usage: worktree-add.mjs --suffix SUFFIX [--parent DIR] [--no-install]\n'), text);
+    assert.ok(
+        text.startsWith('Usage: worktree-add.mjs --suffix SUFFIX [--parent DIR] [--no-install] [--link PATH]...\n'),
+        text
+    );
     assert.match(
         text,
         /^ {2}--no-install +skip the dependency installs; dependency folders are cloned or linked instead$/mu
     );
+});
+
+await test('usageText names the --link flag and its in-worktree mode', () => {
+    const text = usageText();
+    assert.match(
+        text,
+        /^ {2}--link PATH {6}link PATH \(relative to the repository root, repeatable\) from the main clone into the worktree;$/mu
+    );
+    assert.match(text, /^ {19}inside a linked worktree it links only these paths and needs no --suffix$/mu);
 });
 
 await test('nodeVersionProblem accepts 22 and newer', () => {
