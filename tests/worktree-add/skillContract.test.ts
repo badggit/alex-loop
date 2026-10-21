@@ -28,6 +28,12 @@ const KEYS: readonly string[] = [
     'the earlier link was restored',
     'installs skipped (--no-install): linked ...',
     'installs skipped: the network is disabled in this sandbox; linked ...',
+    'not linked:',
+    'not linked with --link:',
+    'build outputs are now shared with the main clone',
+    'that .gitignore does not ignore',
+    'this worktree has links to the main clone outside the current rules',
+    'not expanded',
 ];
 
 // Backticked texts in step 4 that are paths, commands, levels or shell messages, not script log text.
@@ -41,6 +47,8 @@ const NOT_LOG_TEXT: ReadonlySet<string> = new Set([
     'node: not found',
     'No such file or directory',
     'Node 22 or newer is required, found X',
+    // The offered command, not log text.
+    "--link 'PATH'",
 ]);
 
 // Texts the script builds from parts; each part must stand in the sources as written here.

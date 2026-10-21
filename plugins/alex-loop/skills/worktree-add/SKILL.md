@@ -1,12 +1,12 @@
 ---
 name: worktree-add
-description: "Creates a sibling git worktree of the current project for parallel work, named after the current task, with per-worktree copies of the .env files, CLAUDE.local.md and temp.local and dependencies installed from the branch's own lock files, and moves the session into it. Invoked ONLY when the user runs /alex-loop:worktree-add, optionally with --no-install and a parent folder. Do NOT self-trigger on generic requests like 'create a worktree'."
+description: "Creates a sibling git worktree of the current project for parallel work, named after the current task, with per-worktree copies of the .env files, install-time config and version pins, links to the main clone only for known editor and agent files, and dependencies installed from the branch's own lock files, and moves the session into it. Invoked ONLY when the user runs /alex-loop:worktree-add, optionally with --no-install and a parent folder. Do NOT self-trigger on generic requests like 'create a worktree'."
 argument-hint: "[--no-install] [FOLDER]"
 disable-model-invocation: true
 allowed-tools: Bash(${CLAUDE_PLUGIN_ROOT}/skills/worktree-add/scripts/worktree-add.mjs *)
 ---
 
-<!-- Updated: 2026-10-16 -->
+<!-- Updated: 2026-10-21 -->
 
 # worktree-add
 
@@ -15,7 +15,15 @@ A thin wrapper around `scripts/worktree-add.mjs`, a Node script. The skill deriv
 What the script does (for answering questions; never repeat its work):
 
 - The folder is `MAINFOLDER-SUFFIX`, next to the main clone or inside the given parent folder. The script derives the name; the skill only passes the suffix.
-- `.env`, `.env.*`, `CLAUDE.local.md` and `temp.local` are copied per worktree. Build caches are skipped. Every other ignored entry (including `docs.local` and `.claude`) is linked to the main clone.
+- The main clone's ignored entries are placed by rules, at any depth unless a rule says otherwise; the first match wins:
+  - copied per worktree (never linked): `.env`, `.env.*`, `CLAUDE.local.md`, `temp.local`, the install-time config `.npmrc`, `.yarnrc`, `.yarnrc.yml`, `bunfig.toml`, `uv.toml`, `poetry.toml`, the version pins `.python-version`, `.nvmrc`, `.node-version`, `.tool-versions`, and `.envrc`;
+  - dependency folders (`node_modules`, Python environments) go to the install stage below;
+  - skipped and never reported: build outputs, caches and tool state (`dist`, `build`, `out`, `coverage`, `.cache`, `.next`, `__pycache__`, `*.egg-info`, `*.pyc`, `.pytest_cache`, `.terraform`, `.vercel`, `.direnv`, `.DS_Store`, `*.log` and similar; `target` only beside `Cargo.toml`, `pom.xml`, `build.gradle` or `build.gradle.kts`);
+  - linked to the main clone: anything under the top-level folders `.idea`, `.vscode`, `.claude`, `.codex`, `.cursor`, `.gemini`, `.zed`; a `.claude/settings.local.json` at any depth; and at the top level only `AGENTS.md`, `CLAUDE.md`, `GEMINI.md` and `STEM.local` / `STEM.local.EXT` names such as `docs.local` (a bare `.local` does not count);
+  - a folder git lists as ignored whole is walked in the main clone (at most 5000 entries and 6 levels deep) and the same rules apply inside it, so a `secrets/.env` inside it is copied; missing parent folders are made as real folders in the worktree. A folder over the limits is not expanded (`not expanded` warning);
+  - everything else is not linked and is named in one `not linked:` info line (largest first, at most 10 paths).
+- `--link PATH` (repeatable, relative to the repository root) links that path from the main clone. From the main clone it applies to the worktree being created or reused; from inside a linked worktree it needs no suffix and links only the given paths into that worktree, with nothing created, synced or installed. It refuses (`not linked with --link:` warning, the run goes on) a path that does not exist or is not ignored in the main clone, a dependency folder or a copied entry (or a path inside one), a path inside a folder the rules already link whole, a path whose parent folder in the worktree is a link or not a folder (or cannot be created), and a path where something else already stands in the worktree. Over a skip name it links and warns that build outputs are now shared. A forced folder is linked whole, including any `.env` or dependency folder inside it. A path linked earlier logs nothing new.
+- Each run checks the tool's lines in the shared exclude file: a line that hides files `.gitignore` does not ignore gets a warning, and links of the tool that the current rules would not place get one info line. Nothing is removed.
 - Dependencies (`node_modules`, and `.venv`, `venv` or any other folder holding `pyvenv.cfg`) are installed per worktree from the branch's own lock files (npm, pnpm, yarn, bun, uv), not linked. A project is installed automatically when it sits at the worktree root or the main clone has its dependency folder; others get a `not installed automatically` line with the command. For a uv project only its root `.venv` is installed; another Python environment inside it is linked like an orphan.
 - A nested `node_modules` without its own lock file belongs to the root JS project only when the root's `workspaces` cover that folder; otherwise it is an orphan.
 - Fallback: with `--no-install`, when the manager is not on PATH, or for an orphan (a folder no supported lock file covers), `node_modules` is cloned with copy-on-write, else linked, and a Python environment is linked. When `CODEX_SANDBOX_NETWORK_DISABLED=1`, installs are skipped and every dependency folder gets the same fallback as with `--no-install`; the log names the commands to run later. A folder whose parent does not exist in the worktree is skipped (`skipped ... does not exist in the worktree`); it is simply absent, not kept or linked. When the main clone's ignored files cannot be listed or synced, only the projects at the worktree root install automatically from the worktree's own lock files; nested projects get `not installed automatically` lines and the orphan fallback is skipped, with one warning that says so.
@@ -53,8 +61,14 @@ ${CLAUDE_PLUGIN_ROOT}/skills/worktree-add/scripts/worktree-add.mjs --suffix 'SUF
 ${CLAUDE_PLUGIN_ROOT}/skills/worktree-add/scripts/worktree-add.mjs --suffix 'SUFFIX' --parent 'DIR' --no-install
 ```
 
+The only other form links one path into the current worktree. Run it only from inside the worktree and only after the user's explicit yes to the step 4 offer, never as part of creating a worktree:
+
+```
+${CLAUDE_PLUGIN_ROOT}/skills/worktree-add/scripts/worktree-add.mjs --link 'PATH'
+```
+
 - Write the script path UNQUOTED, exactly as above, so the command text matches the `allowed-tools` rule. This relies on the resolved plugin path holding no spaces or shell metacharacters, which holds for the plugin cache and the development folder.
-- Every argument value (SUFFIX, DIR) is POSIX single-quoted, DIR exactly as typed: wrap it in `'...'` and write each apostrophe inside it as `'\''`. Never use double quotes and never leave a value unquoted, even when it looks harmless. Examples:
+- Every argument value (SUFFIX, DIR, PATH) is POSIX single-quoted, DIR exactly as typed: wrap it in `'...'` and write each apostrophe inside it as `'\''`. Never use double quotes and never leave a value unquoted, even when it looks harmless. Examples:
 
 ```
 $(id)       ->  '$(id)'
@@ -82,12 +96,21 @@ A `not installed with MANAGER: PATH already stands in the worktree and is left a
 
 Whenever the output shows a dependency folder (`node_modules`, `.venv`, `venv` or a Python environment, at any depth) as linked, warnings or not (for example `installs skipped (--no-install): linked ...`, `installs skipped: the network is disabled in this sandbox; linked ...`, `linked ... meanwhile`, `linked it`, `linked it instead`, `linked node_modules: REASON` or `the earlier link was restored`), add that installs must not run in this worktree until the link itself is removed with `rm PATH` (no trailing slash; for example `rm node_modules`, `rm .venv`, `rm packages/a/node_modules`), because an install through the link writes into the main clone.
 
+An `info` line starting with `not linked:` is information, not a failure: those ignored paths of the main clone were left out on purpose. Relay it as is and do not offer anything yet. When a later error in the worktree (a missing database, fixtures, model weights, a missing config) names a path from that line, explain the cause in plain words and offer the exact command to run from inside the worktree: the absolute script path followed by `--link 'PATH'` (the step 3 form). Never run it without the user's explicit yes, because a link makes the worktree read and write the main clone's data. Never work around the gap by mocking, skipping tests, re-creating or re-downloading the data.
+
+A `not linked with --link:` warning says why a `--link` path was refused (for example it is not ignored in the main clone, it is copied per worktree, or it is inside a folder that is already linked whole); relay the reason and do not retry. A `build outputs are now shared with the main clone` warning means a build or cache folder is now a link: builds in the worktree write into the main clone.
+
+A `not expanded` warning names an ignored folder too large or too deep to walk: nothing inside it was copied or linked, except entries git lists separately. A `skipped` warning whose reason is `its folder ... in the worktree is a link or not a folder` or `cannot create its folder` means a copy or link could not be placed because its parent folder is blocked in the worktree; name the blocking folder.
+
+A warning with `hides ...` and `that .gitignore does not ignore` (the full text is `hides ... that .gitignore does not ignore`) names an old line of this tool in the shared exclude file that now hides real files from `git status` and `git add` in every worktree. Give the safe order: first remove the tool's link at the named path in every worktree with `rm PATH` (no trailing slash), then delete the named line from the exclude file. Removing the line first can make an old link show up as a committable file. An `info` line `this worktree has links to the main clone outside the current rules` is information only: those links came from an older version and still work; nothing was removed, and the user may remove them with `rm PATH` (no trailing slash) if they are not wanted.
+
 Runtime: the script needs git and Node 22 or newer on PATH. When the command fails because `node` is missing (shell exit 127, or a `node: not found` or `No such file or directory` message), say that Node 22 or newer is required and stop. An older Node is reported by the script itself (`Node 22 or newer is required, found X`).
 
 ## 5. Find PATH
 
 The output mixes stdout and stderr in no guaranteed order. Log lines start with an ISO timestamp, for example `2026-10-08T10:00:00Z info ...`.
 
+- After a `--link` run from inside the worktree, the printed path is the current worktree: do not switch, and go to step 7.
 - If a log line, right after the timestamp, starts with `info already in the worktree `, the session already works in a linked worktree and nothing was created: say so in one sentence, do not switch, and go to step 7.
 - Otherwise PATH is the single output line that starts with `/`. If there is not exactly one such line, do not switch: give the step 6 fallback lines with the literal placeholder `PATH` and say that the worktree path is in the output above.
 
@@ -109,4 +132,5 @@ End the reply with this one line: inside the worktree, deleting a linked folder 
 
 - No checks of your own before or after the run: no git, file or directory inspection. The script checks everything.
 - Never retry with other arguments and never run any other command. Use no tools other than the one Bash call, tool search for `EnterWorktree`, and `EnterWorktree` itself.
+- The one exception is a single `--link 'PATH'` run from inside the worktree (step 3 form), and only after the user's explicit yes to the offer from step 4. Never pass `--link` on your own, and never use it to work around an error without that yes.
 - Removal stays manual: `git worktree remove PATH` and `git branch -d BRANCH` from the main clone when the work is done.
