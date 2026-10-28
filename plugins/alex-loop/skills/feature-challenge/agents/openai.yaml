@@ -1,4 +1,4 @@
 interface:
   display_name: "Feature Challenge"
-  short_description: "Optional gate in the Alex Loop workflow. Stress-test a design or plan by assuming it already failed and working backward to find every reason why."
-  default_prompt: "Use $feature-challenge to stress-test the design or plan before it commits."
+  short_description: "Optional gate in the Alex Loop workflow. Stress-test a design, plan, or branch by assuming it already failed and working backward to find every reason why."
+  default_prompt: "Use $feature-challenge to stress-test the design, plan, or finished branch before it commits."

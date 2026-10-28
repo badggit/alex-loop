@@ -44,6 +44,8 @@ The main agent is a thin orchestrator: it owns user interaction (every `AskUserQ
 
 **On return**, the orchestrator reads ONLY the summary. A returned gate condition feeds the corresponding `AskUserQuestion` in **Complexity Discipline** or **Plan Size Ceiling** — those asks are the orchestrator's, populated with the planner's specifics. A written plan proceeds to the challenge offer and execution handoff. Spot-checking the plan file (header, one or two tasks) is fine; re-reading it wholesale defeats the delegation.
 
+**Reference-parity work.** When the approved design's goal is parity with a reference (an existing app, a previous version, a spec to match), the orchestrator runs a `feature-panel` **gap** panel before dispatching the planner: work-list = the reference's capabilities, compared against the current code. Save the verified backlog in the feature folder and pass its path in item 3 as a constraint. The design stays the source of truth; the backlog is a coverage checklist, so every `must` item maps to a plan task or is reported back as out of the design's scope.
+
 **Iteration:** user-accepted small edits (rename, drop a task, fix a path) are applied by the orchestrator directly per **Iterating on a Saved Plan**. Structural rework (re-scoping, re-waving, a design-change ripple) re-dispatches the planner with the prior plan path plus the feedback.
 
 ## Autonomous mode (feature-panel)

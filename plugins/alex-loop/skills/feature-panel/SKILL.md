@@ -146,7 +146,7 @@ Panels are read-only analysis; the orchestrator (main loop) owns all writes, fix
 
 ## Autonomous mode (opt-in)
 
-Purpose: once the design is approved, execute to a panel-verified bar **without per-step user check-ins**. Opt in per project with a directive in the project's checked-in instruction file — `CLAUDE.md` under Claude Code, `AGENTS.md` under Codex:
+Purpose: once the design is approved, execute to a panel-verified bar **without per-step user check-ins**. Opt in per project with a directive in a repo-root instruction file — `CLAUDE.md` under Claude Code, `AGENTS.md` under Codex, or their machine-local `CLAUDE.local.md` / `AGENTS.local.md` variants (the opt-in check reads all four; `feature-config` writes to the machine-local file when one exists):
 
 ```
 <!-- alex-loop: autonomous -->
