@@ -1,4 +1,4 @@
-<!-- Updated: 2026-10-16 -->
+<!-- Updated: 2026-10-28 -->
 
 # alex-loop
 
@@ -9,7 +9,7 @@ A plugin packaging the design-to-implementation skill chain plus the multi-agent
 ### Claude Code
 
 ```
-/plugin marketplace add <owner>/<repo>
+/plugin marketplace add badggit/alex-loop
 /plugin install alex-loop@alex-loop
 ```
 
@@ -18,7 +18,7 @@ Skills are namespaced under the plugin, so they invoke as `/alex-loop:feature-de
 ### Codex
 
 ```
-codex plugin marketplace add <owner>/<repo>
+codex plugin marketplace add badggit/alex-loop
 codex plugin add alex-loop@alex-loop
 ```
 
