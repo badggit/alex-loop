@@ -111,7 +111,7 @@ Directives: `alex-loop: autonomous` — skips message-wording and file-selection
 
 ### `feature-config` — repo-level settings interview
 
-- Reviews every recognized directive (autonomous mode, commit policy, external-model egress, design-interview depth) with its current effective value, then asks one question per setting — each skippable, each unsettable back to its default.
+- Reviews every recognized directive (autonomous mode, commit policy, external-model egress, design-interview depth, context-watchdog auto-enable) with its current effective value, then asks one question per setting — each skippable, each unsettable back to its default.
 - Writes only anchored whole-line directives into the repo-root instruction file and verifies every written line against the same grep the skills use to detect it; when a machine-local `CLAUDE.local.md`/`AGENTS.local.md` exists it writes there, falling back to the checked-in `CLAUDE.md`/`AGENTS.md` otherwise.
 - Surfaces conflicts between the instruction files (machine-local overrides checked-in) and inert near-miss lines the anchored greps ignore; never commits, never touches global config, never invents a directive nothing consumes.
 
