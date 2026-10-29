@@ -1,6 +1,6 @@
 {
   "name": "alex-loop",
-  "version": "1.18.0",
+  "version": "1.18.1",
   "description": "Design-to-implementation skill chain for Claude Code: feature-design, then feature-plan, then feature-implement, with an adversarial feature-challenge pass and a feature-panel multi-agent verifier. A feature-fix fast path handles scoped changes (bugs, chores, tweaks) with a known end-state, no design phase. Opt-in autonomous mode self-drives the chain after design approval, panel-gated to a unanimous bar. Bundles the feature-git-branch and feature-git-commit helpers plus session-injected workflow rules. A feature-config interview reviews and writes the repo-level directives (autonomous mode, commit policy, external models, design-interview depth, context-watchdog auto-enable). A context-watchdog skill keeps working state across auto-compaction: a checkpoint is saved before it and restored after it. A worktree-add skill creates a sibling git worktree for parallel work, with per-worktree copies of the .env files and local notes, dependencies installed per worktree from the branch's own lock files (the package managers may use the network; --no-install clones or links them instead) and links for other ignored files; it needs Node 22+.",
   "author": {
     "name": "badggit"

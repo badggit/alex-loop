@@ -104,12 +104,25 @@ await test('a yarnPath release pins the berry major', (t) => {
     assert.equal(expected.accepts(5), false);
 });
 
-await test('pnpm lockfileVersion 9.0 accepts pnpm 9 and 10 only', (t) => {
+await test('pnpm lockfileVersion 9.0 accepts pnpm 9 and every later major', (t) => {
     const dir = project(t, { 'package.json': EMPTY_PACKAGE, 'pnpm-lock.yaml': "lockfileVersion: '9.0'\n" });
     const expected = expectVersion(chooseManager(dir, 'js', ['pnpm-lock.yaml']), 'pnpm');
-    assert.equal(expected.accepts(9), true);
-    assert.equal(expected.accepts(10), true);
-    assert.equal(expected.accepts(8), false);
+    assert.deepEqual(
+        [8, 9, 10, 11, 12].map((major) => expected.accepts(major)),
+        [false, true, true, true, true]
+    );
+    assert.equal(expected.text, 'pnpm 9 or newer');
+});
+
+await test('a pnpm pin newer than pnpm 10 next to lockfileVersion 9.0 pins that major', (t) => {
+    const dir = project(t, {
+        'package.json': JSON.stringify({ packageManager: 'pnpm@12.14.0' }),
+        'pnpm-lock.yaml': "lockfileVersion: '9.0'\n",
+    });
+    const expected = expectVersion(chooseManager(dir, 'js', ['pnpm-lock.yaml']), 'pnpm');
+    assert.equal(expected.accepts(12), true);
+    assert.equal(expected.accepts(10), false);
+    assert.equal(expected.text, 'pnpm 12');
 });
 
 await test('older pnpm lockfileVersions map to their pnpm majors', (t) => {
@@ -195,7 +208,7 @@ await test('a pnpm 8 pin next to lockfileVersion 9.0 is a conflict naming both',
         'pnpm-lock.yaml': "lockfileVersion: '9.0'\n",
     });
     const reason = expectConflict(chooseManager(dir, 'js', ['pnpm-lock.yaml']));
-    assert.equal(reason, 'packageManager names pnpm@8.15.0 but pnpm-lock.yaml is written by pnpm 9 or 10');
+    assert.equal(reason, 'packageManager names pnpm@8.15.0 but pnpm-lock.yaml is written by pnpm 9 or newer');
 });
 
 await test('a berry pin next to a berry lock still pins the exact major', (t) => {
