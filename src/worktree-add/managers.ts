@@ -66,11 +66,15 @@ const EXECUTABLES: Readonly<Record<ManagerName, string>> = {
     uv: 'uv',
 };
 
+// The newest lock format has only a first writer: later pnpm majors keep writing it (pnpm 12 still writes 9.0)
+// until pnpm moves to a new format, and a lock in a format unknown here skips the version check.
+type PnpmLockWriters = { majors: readonly number[] } | { firstMajor: number };
+
 // pnpm lockfileVersion major to the pnpm majors that write it.
-const PNPM_LOCK_MAJORS: ReadonlyMap<number, readonly number[]> = new Map([
-    [9, [9, 10]],
-    [6, [8]],
-    [5, [6, 7]],
+const PNPM_LOCK_MAJORS: ReadonlyMap<number, PnpmLockWriters> = new Map([
+    [9, { firstMajor: 9 }],
+    [6, { majors: [8] }],
+    [5, { majors: [6, 7] }],
 ]);
 
 export function executableOf(manager: ManagerName): string {
@@ -125,6 +129,10 @@ function exactMajor(name: string, major: number): ExpectedVersion {
     return { text: `${name} ${major}`, accepts: (found) => found === major };
 }
 
+function majorOrNewer(name: string, first: number): ExpectedVersion {
+    return { text: `${name} ${first} or newer`, accepts: (found) => found >= first };
+}
+
 function yarnKind(projectDir: string): 'yarn-classic' | 'yarn-berry' | undefined {
     const head = readHead(path.join(projectDir, 'yarn.lock')) ?? '';
     if (/^__metadata:/m.test(head)) {
@@ -148,16 +156,20 @@ function berryExpectation(projectDir: string): ExpectedVersion {
     if (pinned !== undefined) {
         return exactMajor('yarn', pinned);
     }
-    return { text: 'yarn 2 or newer', accepts: (major) => major >= 2 };
+    return majorOrNewer('yarn', 2);
 }
 
 function pnpmExpectation(projectDir: string): ExpectedVersion | undefined {
     const head = readHead(path.join(projectDir, 'pnpm-lock.yaml')) ?? '';
     const match = /^lockfileVersion:\s*["']?(\d+)(?:\.\d+)?["']?\s*$/m.exec(head);
-    const majors = match?.[1] === undefined ? undefined : PNPM_LOCK_MAJORS.get(Number(match[1]));
-    if (majors === undefined) {
+    const writers = match?.[1] === undefined ? undefined : PNPM_LOCK_MAJORS.get(Number(match[1]));
+    if (writers === undefined) {
         return;
     }
+    if ('firstMajor' in writers) {
+        return majorOrNewer('pnpm', writers.firstMajor);
+    }
+    const { majors } = writers;
     return { text: `pnpm ${majors.join(' or ')}`, accepts: (major) => majors.includes(major) };
 }
 

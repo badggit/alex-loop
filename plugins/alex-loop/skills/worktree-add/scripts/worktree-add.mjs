@@ -2024,6 +2024,9 @@ function readPackageManagerField(projectDir) {
 function exactMajor(name, major) {
   return { text: `${name} ${major}`, accepts: (found) => found === major };
 }
+function majorOrNewer(name, first) {
+  return { text: `${name} ${first} or newer`, accepts: (found) => found >= first };
+}
 function yarnKind(projectDir) {
   const head = readHead(path12.join(projectDir, "yarn.lock")) ?? "";
   if (/^__metadata:/m.test(head)) {
@@ -2045,15 +2048,19 @@ function berryExpectation(projectDir) {
   if (pinned !== void 0) {
     return exactMajor("yarn", pinned);
   }
-  return { text: "yarn 2 or newer", accepts: (major) => major >= 2 };
+  return majorOrNewer("yarn", 2);
 }
 function pnpmExpectation(projectDir) {
   const head = readHead(path12.join(projectDir, "pnpm-lock.yaml")) ?? "";
   const match = /^lockfileVersion:\s*["']?(\d+)(?:\.\d+)?["']?\s*$/m.exec(head);
-  const majors = match?.[1] === void 0 ? void 0 : PNPM_LOCK_MAJORS.get(Number(match[1]));
-  if (majors === void 0) {
+  const writers = match?.[1] === void 0 ? void 0 : PNPM_LOCK_MAJORS.get(Number(match[1]));
+  if (writers === void 0) {
     return;
   }
+  if ("firstMajor" in writers) {
+    return majorOrNewer("pnpm", writers.firstMajor);
+  }
+  const { majors } = writers;
   return { text: `pnpm ${majors.join(" or ")}`, accepts: (major) => majors.includes(major) };
 }
 function fromLock(projectDir, family) {
@@ -2213,9 +2220,9 @@ var init_managers = __esm({
       uv: "uv"
     };
     PNPM_LOCK_MAJORS = /* @__PURE__ */ new Map([
-      [9, [9, 10]],
-      [6, [8]],
-      [5, [6, 7]]
+      [9, { firstMajor: 9 }],
+      [6, { majors: [8] }],
+      [5, { majors: [6, 7] }]
     ]);
   }
 });
