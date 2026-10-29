@@ -181,7 +181,7 @@ The plugin also ships always-on rules in `plugins/alex-loop/rules/`. A `SessionS
 
 | Rule | Role |
 |---|---|
-| `model-selection` | Model rankings and frontier/balanced/fast tiers, cross-family preference for verification seats, runtime presence checks, the data-egress policy for external providers, per-provider curl harnesses. |
+| `model-selection` | Model rankings and frontier/balanced/fast tiers by model family (always the newest version of each family; a forbidden model falls back to the session model), cross-family preference for verification seats, runtime presence checks, the data-egress policy for external providers, per-provider curl harnesses. |
 | `commit-authority` | Who may commit and when: the `commitPolicy` values and resolution order, sole-committer and no-push invariants. |
 | `use-subagents` | Delegation criteria, orchestrator-keeps-own-work, parallelization and triangulation, prompt self-containment, subagents-cannot-fan-out, verify-the-diff. |
 | `verify-before-completion` | Evidence-before-claims gates: diagnosis discipline, baselines, phase-end verification chains, removed-symbol and band-aid sweeps, honest reporting. |
